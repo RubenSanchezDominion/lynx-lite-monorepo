@@ -1,0 +1,13 @@
+{
+  "name": "datadis-mock-server",
+  "version": "1.0.0",
+  "description": "Mock server para la API privada de DATADIS - desarrollo LYNX Lite",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "lynx-lite-monorepo",
+  "private": true,
+  "workspaces": [
+    "lynx-lite-mocks",
+    "lynx-lite"
+  ]
+}
