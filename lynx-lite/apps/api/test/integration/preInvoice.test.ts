@@ -128,6 +128,20 @@ describe('TC-PRE-025 - falta maestro regulatorio', () => {
   });
 });
 
+// TC-PRE-025b - MAXIMETRO sin término de exceso -> REGULATORY_DATA_MISSING
+describe('TC-PRE-025b - falta ExcessPowerRate con maximetro', () => {
+  it('eleva REGULATORY_DATA_MISSING si el contrato es MAXIMETRO y no hay tepp4-5', async () => {
+    setupHappyPath2_0TD({ supply: { tariff: 'T_3_0TD' } });
+    mockPrisma.tollRate.findMany.mockResolvedValue(allPeriodRates('POWER').concat(allPeriodRates('ENERGY')));
+    mockPrisma.chargeRate.findMany.mockResolvedValue(allPeriodRates('POWER').concat(allPeriodRates('ENERGY')));
+    mockPrisma.contract.findFirst.mockResolvedValue(contract3_0TD()); // MAXIMETRO
+    mockPrisma.excessPowerRate.findMany.mockResolvedValue([]); // maestro de exceso ausente
+    tsResult = { ...defaultTs(), consumptionByPeriod: { P1: 100, P2: 100, P3: 100, P4: 100, P5: 100, P6: 100 }, pvpcByPeriod: sixPvpc() };
+    const res = await runOp(server, CALC, { variables: { i: period }, user: DOMINION });
+    expect(errorCode(res)).toBe('REGULATORY_DATA_MISSING');
+  });
+});
+
 // TC-PRE-007 - Persistencia idempotente
 describe('TC-PRE-007 - savePreInvoice idempotente', () => {
   it('si ya existe (supplyId, from, to) actualiza y devuelve el mismo id', async () => {

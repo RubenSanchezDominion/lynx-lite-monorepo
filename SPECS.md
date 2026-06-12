@@ -1686,6 +1686,23 @@ durante el cálculo.
      **Sin** raíz cuadrada, **sin** ×2, **sin** `Kp` (eso era la fórmula previa a 2025 o la de
      tipos 1–3). Esta función reemplaza el modelo erróneo del Paso 3 de §3.4 en la fase previa.
 
+### 4.0bis Prerrequisitos de implementación (Fase 1)
+
+Estado al inicio de M02 (tras la Fase 0, commit de corrección de excesos de M01):
+
+- **Ya existe**: `computeExcessTerm()` exportado por `pricing-engine` (`src/excess.ts`), el maestro
+  `ExcessPowerRate` (Prisma + seed + demo store), y `loadRegulatoryRates(..., { requireExcess })`.
+- **Falta extraer (parte de Fase 1)**: `computePowerTerm()` **no existe todavía** como función
+  exportada. Hay que refactorizar el Paso 1 de §3.4 (bucle del término de potencia en
+  `pricing-engine/src/engine.ts`) a una función pura `computePowerTerm(power, tollPower, chargePower, days)`
+  y exportarla, de modo que M01 (`calculate`) y M02 la compartan. No debe cambiar ningún resultado
+  de M01 (refactor sin cambio de comportamiento; los TC-PRE siguen verdes).
+- **Migraciones Prisma**: el repo nunca se ha ejecutado contra Postgres real (no hay carpeta
+  `prisma/migrations`). Los modelos nuevos de M02 (`PowerOptimization`, `PowerOptimizationPeriod`)
+  y la relación inversa en `Supply` se añaden al `schema.prisma` y se aplican con `prisma migrate dev`
+  cuando exista BD; en tests se usa el cliente mockeado.
+- **Patrón de tests**: Vitest; mock de Prisma con `vi.hoisted` (no `vitest-mock-extended`, ver §5.3).
+
 ### 4.1 Fuentes de datos
 
 | Fuente | Endpoint / origen | Dato obtenido | Uso en M02 |
@@ -1781,6 +1798,30 @@ El cálculo puro vive en un módulo nuevo **`packages/optimization-engine`** (mi
 `pricing-engine`: sin I/O, sin Prisma, sin InfluxDB; 100 % testeable con datos sintéticos).
 Reutiliza `computePowerTerm()` y `computeExcessTerm()` exportados por `pricing-engine`. El resolver
 de `apps/api` carga la curva desde InfluxDB, deriva la muestra de potencia por período y la pasa al engine.
+
+#### Responsabilidad del resolver / data source (construcción de los inputs)
+
+El engine es puro: **todos** los agregados del `OptimizationInput` los construye el resolver (o un
+`PowerOptimizationDataSource` inyectable, espejo de `PreInvoiceDataSource` de M01) a partir de
+`hourly_consumption` en InfluxDB, leyendo la ventana `[analysisFrom, analysisTo]`. Para cada intervalo
+de la curva se deriva la potencia `kW = kwh / horasDelIntervalo` (1 h → ×1; 15 min → ×4) y se etiqueta
+con su **período de potencia** (mapeo energía→potencia del calendario de ingesta, §3.3; en 2.0TD los 3
+períodos de energía se agrupan en 2 de potencia). Solo se usan puntos con `gap="false"`. A partir de ahí:
+
+| Campo del input | Cómo lo construye el resolver |
+|-----------------|-------------------------------|
+| `powerSamplesByPeriod[Pi]` | array de todas las potencias derivadas de la ventana, agrupadas por período de potencia |
+| `monthlyP99ByPeriod["YYYY-MM"][Pi]` | percentil 99 de las potencias de **ese mes** y período (para sobredimensionamiento) |
+| `monthlyMaxByPeriod["YYYY-MM"][Pi]` | máximo mensual por período del measurement `max_power` (`Pdp`) |
+| `overContractedRatioByPeriod["YYYY-MM"][Pi]` | nº de intervalos del mes con potencia derivada > `contractedPower[Pi]` ÷ nº total de intervalos del mes en ese período |
+| `daysByMonth["YYYY-MM"]` | días de facturación de cada mes de la ventana (`n` de la fórmula de excesos) |
+| `granularity` | `'hourly'` o `'quarter'` según la resolución real de la curva en InfluxDB |
+| `contractedPower`, `modePowerControl` | del `Contract` vigente; `lastPowerChangeDate` = `Contract.validFrom` más reciente |
+| `tollRatesPower`, `chargeRatesPower`, `excessRatesPower` | de `loadRegulatoryRates(..., { requireExcess: isMaximetro })` |
+
+> El histórico mínimo (12 meses) se valida en el resolver **antes** de invocar al engine; si la ventana
+> tiene menos meses con datos → `INSUFFICIENT_HISTORY`. Si no hay ningún punto `gap="false"` →
+> `NO_CONSUMPTION_DATA`.
 
 #### Interfaz del optimization-engine
 
