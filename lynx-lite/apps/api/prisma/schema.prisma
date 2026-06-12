@@ -1,0 +1,213 @@
+// LYNX Lite — esquema Prisma (M01 + auth)
+// Fuente: SPECS §2.3 (usuarios) + §3.2 (suministro, maestros, pre-facturas)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  DOMINION
+  ADMIN
+  GESTOR
+  USUARIO
+}
+
+enum SupplyStatus {
+  PENDING_APPROVAL
+  ACTIVE
+  INACTIVE
+}
+
+enum BackfillStatus {
+  PENDING
+  RUNNING
+  DONE
+  FAILED
+}
+
+enum Tariff {
+  T_2_0TD
+  T_3_0TD
+}
+
+enum PowerControl {
+  ICP
+  MAXIMETRO
+}
+
+enum RateType {
+  POWER
+  ENERGY
+}
+
+// ─── Usuarios ──────────────────────────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         UserRole
+
+  clientId String?
+  client   Client? @relation(fields: [clientId], references: [id])
+
+  supplyId String?
+  supply   Supply? @relation(fields: [supplyId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ─── Cliente y suministro ──────────────────────────────────────────────────────
+
+model Client {
+  id        String   @id @default(uuid())
+  name      String
+  vatNumber String   @unique
+  email     String?
+  supplies  Supply[]
+  users     User[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Supply {
+  id             String         @id @default(uuid())
+  cups           String         @unique
+  clientId       String
+  client         Client         @relation(fields: [clientId], references: [id])
+  address        String?
+  tariff         Tariff
+  status         SupplyStatus   @default(ACTIVE)
+  requestedBy    String? // userId del ADMIN que creó la solicitud; null si creado por DOMINION
+  backfillStatus BackfillStatus @default(PENDING)
+  contracts      Contract[]
+  preInvoices    PreInvoice[]
+  users          User[]
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+}
+
+// Snapshot del contrato vigente (origen: DATADIS get-contract-detail)
+model Contract {
+  id                String       @id @default(uuid())
+  supplyId          String
+  supply            Supply       @relation(fields: [supplyId], references: [id])
+  validFrom         DateTime
+  validTo           DateTime?
+  contractedPowerP1 Float
+  contractedPowerP2 Float
+  contractedPowerP3 Float?
+  contractedPowerP4 Float?
+  contractedPowerP5 Float?
+  contractedPowerP6 Float?
+  modePowerControl  PowerControl
+  hasSurplus        Boolean      @default(false)
+  createdAt         DateTime     @default(now())
+}
+
+// ─── Maestros regulatorios (versionados por fecha de vigencia) ─────────────────
+
+model TollRate {
+  id        String    @id @default(uuid())
+  tariff    Tariff
+  period    Int
+  rateType  RateType
+  eur       Float
+  validFrom DateTime
+  validTo   DateTime?
+
+  @@unique([tariff, period, rateType, validFrom])
+}
+
+model ChargeRate {
+  id        String    @id @default(uuid())
+  tariff    Tariff
+  period    Int
+  rateType  RateType
+  eur       Float
+  validFrom DateTime
+  validTo   DateTime?
+
+  @@unique([tariff, period, rateType, validFrom])
+}
+
+model IEERate {
+  id        String    @id @default(uuid())
+  rate      Float
+  validFrom DateTime
+  validTo   DateTime?
+}
+
+model VATRate {
+  id        String    @id @default(uuid())
+  rate      Float
+  validFrom DateTime
+  validTo   DateTime?
+}
+
+model MeterRentalRate {
+  id        String    @id @default(uuid())
+  tariff    Tariff
+  eurPerDay Float
+  validFrom DateTime
+  validTo   DateTime?
+}
+
+model ReactiveEnergyRate {
+  id        String    @id @default(uuid())
+  tier      Int // 1 = 0,80 ≤ cos φ < 0,95 | 2 = cos φ < 0,80
+  eur       Float
+  validFrom DateTime
+  validTo   DateTime?
+
+  @@unique([tier, validFrom])
+}
+
+// ─── Pre-facturas calculadas ────────────────────────────────────────────────────
+
+model PreInvoice {
+  id                  String           @id @default(uuid())
+  supplyId            String
+  supply              Supply           @relation(fields: [supplyId], references: [id])
+  periodFrom          DateTime
+  periodTo            DateTime
+  tariff              Tariff
+  powerTerm           Float
+  energyTerm          Float
+  excessPower         Float            @default(0)
+  reactiveEnergy      Float?
+  surplusCompensation Float?
+  meterRental         Float
+  subtotal            Float
+  ieeAmount           Float
+  vatAmount           Float
+  total               Float
+  gapHoursCount       Int              @default(0)
+  gapPeriodsJson      Json?
+  lines               PreInvoiceLine[]
+  createdAt           DateTime         @default(now())
+
+  @@unique([supplyId, periodFrom, periodTo])
+}
+
+model PreInvoiceLine {
+  id           String     @id @default(uuid())
+  preInvoiceId String
+  preInvoice   PreInvoice @relation(fields: [preInvoiceId], references: [id], onDelete: Cascade)
+  concept      String
+  period       Int?
+  quantity     Float
+  unit         String
+  unitPrice    Float
+  amount       Float
+  sortOrder    Int
+}

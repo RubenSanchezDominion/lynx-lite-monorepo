@@ -1,0 +1,27 @@
+{
+  "name": "@lynx-lite/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@influxdata/influxdb-client": "^1.33.0",
+    "@lynx-lite/data-collector": "*",
+    "@prisma/client": "^5.17.0",
+    "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/node-cron": "^3.0.11",
+    "prisma": "^5.17.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}
