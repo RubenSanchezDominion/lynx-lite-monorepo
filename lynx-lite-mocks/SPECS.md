@@ -208,6 +208,32 @@ type MaxPowerRecord = {
 
 ---
 
+#### `GET /api-private/api/get-reactive-data-v2`
+
+**Query params**:
+| Param | Tipo | Req | Valores |
+|---|---|---|---|
+| `cups` | string | Sí | |
+| `distributorCode` | string | Sí | |
+| `startDate` | string | Sí | `YYYY/MM` |
+| `endDate` | string | Sí | `YYYY/MM` |
+| `authorizedNif` | string | No | |
+
+**Response 200** `ReactiveRecord[]`:
+```typescript
+type ReactiveRecord = {
+  cups: string;
+  date: string;                     // 'YYYY/MM' (mes al que corresponde)
+  period: '1' | '2' | '3' | '4' | '5' | '6';
+  kvarh: number;                    // energía reactiva inductiva mensual, 3 decimales
+}
+```
+Energía reactiva mensual por periodo (1 registro por mes × periodo). **Solo perfiles 3.0TD devuelven datos** (6 periodos); 2.0TD y 6.1TD devuelven `[]` (reactiva fuera de alcance).  
+**Response 429** si la misma consulta se repite en < 24 h.  
+**Response 400** si faltan params obligatorios.
+
+---
+
 #### `GET /dev/status` · `POST /dev/reset-rate-limit`
 
 Solo para desarrollo. Sin auth. Comportamiento existente sin cambios.

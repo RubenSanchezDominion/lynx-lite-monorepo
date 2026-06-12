@@ -26,9 +26,9 @@ lynx-lite-monorepo/
 ├── lynx-lite-mocks/              # Ya existente — mocks de DATADIS, ESIOS, REData, PVGIS
 └── lynx-lite/
     ├── apps/
-    │   ├── api/                  # Node.js + Express + Apollo Server (GraphQL)
+    │   ├── api/                  # Node.js + Express + Apollo Server (GraphQL). Incluye modo demo en memoria (sin DBs)
     │   ├── worker/               # Node.js + node-cron (jobs de sincronización y backfill)
-    │   └── web/                  # Angular 17
+    │   └── web/                  # Angular 17 — front mínimo (login + pre-factura) para enseñar M01
     └── packages/
         ├── pricing-engine/       # Módulo de cálculo puro (sin I/O)
         └── data-collector/       # Adaptadores DATADIS + ESIOS → InfluxDB (compartido por api y worker)
@@ -48,7 +48,11 @@ lynx-lite-monorepo/
 }
 ```
 
-*(El workspace `lynx-lite/apps/web` se añadirá cuando arranque el frontend.)*
+*(`lynx-lite/apps/web` **no** es un workspace npm: es un proyecto Angular independiente con su propia
+toolchain y `node_modules`, para aislar las dependencias de Angular del resto del monorepo.)*
+
+El `package.json` raíz además expone scripts de orquestación: `build` (compila packages → `prisma generate`
+→ apps, en ese orden), `build:web` (build del front) y `test` (suites de los 4 paquetes backend).
 
 ### 1.2 Backend — apps/api
 
@@ -65,6 +69,11 @@ lynx-lite-monorepo/
 | ESIOS     | `ESIOS_URL`        | `https://api.esios.ree.es` |
 | REData    | `REDATA_URL`       | `https://apidatos.ree.es` |
 | PVGIS     | `PVGIS_URL`        | `https://re.jrc.ec.europa.eu` |
+
+- **Modo demo (sin DBs)**: `npm run demo` (`src/demo.ts`) arranca el mismo servidor GraphQL pero con
+  datos **en memoria** — inyecta un store en memoria vía `setPrisma()` y un `PreInvoiceDataSource`
+  sintético vía `setDataSource()`, sin Postgres ni InfluxDB. El motor de cálculo es el real; sirve solo
+  para demostrar M01. Login sembrado: `dominion@lynx.local` / `dominion`.
 
 ### 1.3 Pricing Engine — packages/pricing-engine
 
@@ -87,6 +96,15 @@ lynx-lite-monorepo/
 - Usa `@lynx-lite/data-collector` para las llamadas a DATADIS y ESIOS.
 - Comparte las mismas bases de datos (PostgreSQL + InfluxDB) que `apps/api`; la coordinación de estado se hace a través de los campos de PostgreSQL (p.ej. `Supply.backfillStatus`).
 - Sin GraphQL ni endpoints HTTP propios.
+
+### 1.3d Web — apps/web
+
+- **Angular 17** (standalone). Front mínimo para enseñar M01: pantalla de **login** y pantalla de
+  **pre-factura** (selector de CUPS, período, desglose de líneas y totales, banner de huecos).
+- Cliente GraphQL propio (`HttpClient`, sin Apollo) contra `apps/api` en `http://localhost:4000/graphql`.
+- **No es un workspace npm**: proyecto independiente con su propia toolchain y `node_modules`. Se
+  construye/arranca por separado (`npm start` / `npm run build` dentro de `apps/web`, o `build:web` desde raíz).
+- Pensado para apuntar al **modo demo** del api (§1.2); crecerá hasta ser el front definitivo.
 
 ### 1.4 Flujo de ingesta (DATADIS/ESIOS → InfluxDB)
 
@@ -903,7 +921,7 @@ vatAmount = subtotal × vatRate
 total = subtotal + vatAmount
 ```
 
-#### Notas de redondeo
+#### Notas de precisión y redondeo
 
 - Todos los importes se calculan en `number` (float64) **sin redondeo intermedio**.
   Cualquier valor que alimente un cálculo posterior conserva todos sus decimales.
