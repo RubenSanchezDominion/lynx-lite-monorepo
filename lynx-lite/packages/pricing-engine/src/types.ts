@@ -6,6 +6,9 @@ export interface PricingInput {
   contractedPower: Record<string, number>; // kW por período de potencia
   consumption: Record<string, number>;     // kWh totales del período por período de energía
   maxPower: Record<string, number> | null; // kW (ya convertido de W); null si ICP
+  // Término de exceso de potencia tepp4-5 (€/kW·día) por período de potencia.
+  // Origen: maestro ExcessPowerRate. {} si ICP (no se usa).
+  excessRates: Record<string, number>;
   pvpcPrice: Record<string, number>;       // €/kWh medio ponderado por período
 
   tollRates: {
@@ -35,6 +38,29 @@ export interface PricingLine {
   unitPrice: number;
   amount: number;
   sortOrder: number;
+}
+
+// ─── Término de exceso de potencia (art. 9.4.b.1 Circular 3/2020, tipos 4 y 5) ──
+// Función pura reutilizada por M01 (pre-factura) y M02 (optimización de potencia).
+export interface ExcessTermInput {
+  modePowerControl: 'ICP' | 'MAXIMETRO';
+  contractedPower: Record<string, number>;   // Pcp (kW) por período
+  maxPower: Record<string, number> | null;    // Pdp (kW) por período; null = sin maxímetro
+  excessRates: Record<string, number>;        // tepp4-5 (€/kW·día) por período
+  days: number;                                // n — días de facturación del tramo
+}
+
+export interface ExcessTermLine {
+  period: number;
+  excessKw: number;    // Pdp − Pcp (> 0)
+  tepPerDay: number;   // tepp4-5 €/kW·día
+  days: number;        // n
+  amount: number;      // tepp4-5 × (Pdp − Pcp) × n
+}
+
+export interface ExcessTermResult {
+  total: number;
+  lines: ExcessTermLine[];
 }
 
 export interface PricingResult {

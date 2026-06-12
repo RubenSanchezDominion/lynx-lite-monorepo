@@ -23,6 +23,13 @@ const CHARGE_ENERGY = {
   T_2_0TD: { 1: 0.003000, 2: 0.002000, 3: 0.001000 },
   T_3_0TD: { 1: 0.005000, 2: 0.004000, 3: 0.003000, 4: 0.003000, 5: 0.002000, 6: 0.001000 },
 };
+// Término de exceso de potencia tepp4-5 (€/kW·día), tipos 4 y 5 (art. 9.4.b.1).
+// ⚠️ Valores SINTÉTICOS de test/demo. Sustituir por los oficiales de la Resolución
+// de peajes vigente antes de producción.
+const EXCESS_POWER = {
+  T_2_0TD: { 1: 0.060000, 2: 0.060000 },
+  T_3_0TD: { 1: 0.070000, 2: 0.060000, 3: 0.040000, 4: 0.040000, 5: 0.020000, 6: 0.020000 },
+};
 
 async function seedRates() {
   await prisma.iEERate.create({ data: { rate: 0.0511269632, validFrom: VALID_FROM } });
@@ -61,6 +68,11 @@ async function seedRates() {
     for (const [period, eur] of Object.entries(CHARGE_ENERGY[tariff])) {
       await prisma.chargeRate.create({
         data: { tariff, period: Number(period), rateType: RateType.ENERGY, eur, validFrom: VALID_FROM },
+      });
+    }
+    for (const [period, eurPerDay] of Object.entries(EXCESS_POWER[tariff])) {
+      await prisma.excessPowerRate.create({
+        data: { tariff, period: Number(period), eurPerDay, validFrom: VALID_FROM },
       });
     }
   }

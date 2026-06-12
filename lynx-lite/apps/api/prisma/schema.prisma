@@ -162,6 +162,19 @@ model MeterRentalRate {
   validTo   DateTime?
 }
 
+// Término de exceso de potencia tepp4-5 (€/kW·día), tipos de medida 4 y 5.
+// Art. 9.4.b.1 Circular 3/2020 consolidada. Versionado por fecha de vigencia.
+model ExcessPowerRate {
+  id        String    @id @default(uuid())
+  tariff    Tariff
+  period    Int // 1–6
+  eurPerDay Float // tepp4-5 en €/kW·día
+  validFrom DateTime
+  validTo   DateTime?
+
+  @@unique([tariff, period, validFrom])
+}
+
 model ReactiveEnergyRate {
   id        String    @id @default(uuid())
   tier      Int // 1 = 0,80 ≤ cos φ < 0,95 | 2 = cos φ < 0,80

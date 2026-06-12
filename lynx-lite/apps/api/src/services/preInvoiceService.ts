@@ -104,8 +104,9 @@ export async function computePreInvoice(
   const ts = await dataSource.load(input.cups, from, to, tariff);
   if (!ts.hasBillableData) throw gqlError('NO_CONSUMPTION_DATA');
 
-  // 6. Maestros regulatorios.
-  const rates = await loadRegulatoryRates(prisma, supply.tariff, from, to);
+  // 6. Maestros regulatorios (el término de exceso solo se exige con maxímetro).
+  const isMaxim = contract.modePowerControl === 'MAXIMETRO';
+  const rates = await loadRegulatoryRates(prisma, supply.tariff, from, to, { requireExcess: isMaxim });
 
   // 7. Reactiva: solo 3.0TD, meses naturales completos y datos disponibles.
   let reactiveEnergy: Record<string, number> | null = null;
@@ -119,7 +120,6 @@ export async function computePreInvoice(
   const consumption: Record<string, number> = {};
   for (const p of energyPeriods(tariff)) consumption[`P${p}`] = ts.consumptionByPeriod[`P${p}`] ?? 0;
 
-  const isMaxim = contract.modePowerControl === 'MAXIMETRO';
   let maxPower: Record<string, number> | null = null;
   if (isMaxim) {
     maxPower = {};
@@ -137,6 +137,7 @@ export async function computePreInvoice(
     contractedPower: contractedPowerMap(contract, tariff),
     consumption,
     maxPower,
+    excessRates: rates.excessPower,
     pvpcPrice,
     tollRates: { power: rates.tollPower, energy: rates.tollEnergy },
     chargeRates: { power: rates.chargePower, energy: rates.chargeEnergy },

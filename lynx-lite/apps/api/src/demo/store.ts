@@ -24,6 +24,11 @@ const CHARGE_ENERGY: Record<string, Record<number, number>> = {
   T_2_0TD: { 1: 0.003000, 2: 0.002000, 3: 0.001000 },
   T_3_0TD: { 1: 0.005000, 2: 0.004000, 3: 0.003000, 4: 0.003000, 5: 0.002000, 6: 0.001000 },
 };
+// tepp4-5 €/kW·día (sintético, alineado con prisma/seed.ts).
+const EXCESS_POWER: Record<string, Record<number, number>> = {
+  T_2_0TD: { 1: 0.060000, 2: 0.060000 },
+  T_3_0TD: { 1: 0.070000, 2: 0.060000, 3: 0.040000, 4: 0.040000, 5: 0.020000, 6: 0.020000 },
+};
 
 function flattenRates(map: Record<string, Record<number, number>>, rateType: string): Row[] {
   const rows: Row[] = [];
@@ -89,6 +94,12 @@ export async function createInMemoryStore() {
     { id: randomUUID(), tier: 1, eur: 0.041554 },
     { id: randomUUID(), tier: 2, eur: 0.062332 },
   ];
+  const excessPowerRates: Row[] = [];
+  for (const tariff of Object.keys(EXCESS_POWER)) {
+    for (const [period, eurPerDay] of Object.entries(EXCESS_POWER[tariff])) {
+      excessPowerRates.push({ id: randomUUID(), tariff, period: Number(period), eurPerDay });
+    }
+  }
 
   const preInvoices: Row[] = [];
 
@@ -207,6 +218,7 @@ export async function createInMemoryStore() {
     vATRate: { findFirst: async () => vatRates[0] ?? null },
     meterRentalRate: { findFirst: async ({ where }: { where: Row }) => meterRentalRates.find(r => r.tariff === where.tariff) ?? null },
     reactiveEnergyRate: { findMany: async () => reactiveEnergyRates },
+    excessPowerRate: { findMany: async ({ where }: { where: Row }) => excessPowerRates.filter(r => r.tariff === where.tariff) },
   };
 }
 

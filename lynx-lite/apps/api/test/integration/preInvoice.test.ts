@@ -14,6 +14,7 @@ const mockPrisma = vi.hoisted(() => {
     vATRate: d('findFirst'),
     meterRentalRate: d('findFirst'),
     reactiveEnergyRate: d('findMany'),
+    excessPowerRate: d('findMany'),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any;
 });
@@ -173,6 +174,7 @@ describe('TC-PRE-021 - reactiva array vacio -> null', () => {
     // 3.0TD necesita 6 periodos de potencia/energia
     mockPrisma.tollRate.findMany.mockResolvedValue(allPeriodRates('POWER').concat(allPeriodRates('ENERGY')));
     mockPrisma.chargeRate.findMany.mockResolvedValue(allPeriodRates('POWER').concat(allPeriodRates('ENERGY')));
+    mockPrisma.excessPowerRate.findMany.mockResolvedValue(allExcessRates());
     mockPrisma.contract.findFirst.mockResolvedValue(contract3_0TD());
     tsResult = { ...defaultTs(), consumptionByPeriod: { P1: 100, P2: 100, P3: 100, P4: 100, P5: 100, P6: 100 }, pvpcByPeriod: sixPvpc() };
     reactiveResult = null; // distribuidora sin datos V2
@@ -192,6 +194,7 @@ describe('TC-PRE-022 - periodo parcial -> reactiva null', () => {
     ]);
     mockPrisma.tollRate.findMany.mockResolvedValue(allPeriodRates('POWER').concat(allPeriodRates('ENERGY')));
     mockPrisma.chargeRate.findMany.mockResolvedValue(allPeriodRates('POWER').concat(allPeriodRates('ENERGY')));
+    mockPrisma.excessPowerRate.findMany.mockResolvedValue(allExcessRates());
     mockPrisma.contract.findFirst.mockResolvedValue(contract3_0TD());
     tsResult = { ...defaultTs(), consumptionByPeriod: { P1: 100, P2: 100, P3: 100, P4: 100, P5: 100, P6: 100 }, pvpcByPeriod: sixPvpc() };
     reactiveResult = { P1: 900 }; // habria datos, pero el periodo es parcial
@@ -208,6 +211,9 @@ describe('TC-PRE-022 - periodo parcial -> reactiva null', () => {
 // ─── helpers 3.0TD ──────────────────────────────────────────────────────────
 function allPeriodRates(rateType: string) {
   return [1, 2, 3, 4, 5, 6].map(p => ({ period: p, rateType, eur: 0.01 }));
+}
+function allExcessRates() {
+  return [1, 2, 3, 4, 5, 6].map(p => ({ period: p, eurPerDay: 0.05 }));
 }
 function sixPvpc() {
   return { P1: 0.1, P2: 0.1, P3: 0.1, P4: 0.1, P5: 0.1, P6: 0.1 };

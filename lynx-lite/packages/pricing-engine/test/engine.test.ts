@@ -17,6 +17,7 @@ const BASE_2_0TD: PricingInput = {
   contractedPower: { P1: 10.0, P2: 10.0 },
   consumption: { P1: 500.0, P2: 800.0, P3: 1200.0 },
   maxPower: null,
+  excessRates: { P1: 0.060000, P2: 0.060000 }, // tepp4-5 €/kW·día (sintético)
   pvpcPrice: { P1: 0.14000, P2: 0.10000, P3: 0.06000 },
   tollRates: {
     power: { P1: 0.115327, P2: 0.002572 },
@@ -41,6 +42,7 @@ const BASE_3_0TD: PricingInput = {
   contractedPower: { P1: 50, P2: 50, P3: 50, P4: 50, P5: 50, P6: 50 },
   consumption: { P1: 2000, P2: 3000, P3: 4000, P4: 1500, P5: 2500, P6: 5000 },
   maxPower: { P1: 48, P2: 47, P3: 49, P4: 46, P5: 48, P6: 47 },
+  excessRates: { P1: 0.070000, P2: 0.060000, P3: 0.040000, P4: 0.040000, P5: 0.020000, P6: 0.020000 }, // tepp4-5 €/kW·día (sintético)
   pvpcPrice: { P1: 0.18, P2: 0.14, P3: 0.10, P4: 0.16, P5: 0.12, P6: 0.07 },
   tollRates: {
     power: { P1: 0.115327, P2: 0.082748, P3: 0.024894, P4: 0.024894, P5: 0.003695, P6: 0.002572 },
@@ -105,18 +107,19 @@ describe('TC-PRE-002 — 2.0TD, MAXIMETRO, exceso en P1', () => {
 
   it('powerTerm igual TC-PRE-001', () => expectEur(result.powerTerm, 40.27));
   it('energyTerm igual TC-PRE-001', () => expectEur(result.energyTerm, 234.81));
-  it('excessPower total', () => expectEur(result.excessPower, 11.75));
-  it('ieeBase', () => expectEur(result.ieeBase, 286.83));
-  it('ieeAmount', () => expectEur(result.ieeAmount, 14.66));
-  it('subtotal', () => expectEur(result.subtotal, 302.30));
-  it('vatAmount', () => expectEur(result.vatAmount, 63.48));
-  it('total', () => expectEur(result.total, 365.78));
+  // Exceso P1 = (11.5 − 10) × 0.060000 €/kW·día × 31 días = 2.79 € (fórmula real art. 9.4.b.1)
+  it('excessPower total', () => expectEur(result.excessPower, 2.79));
+  it('ieeBase', () => expectEur(result.ieeBase, 277.86));
+  it('ieeAmount', () => expectEur(result.ieeAmount, 14.21));
+  it('subtotal', () => expectEur(result.subtotal, 292.88));
+  it('vatAmount', () => expectEur(result.vatAmount, 61.50));
+  it('total', () => expectEur(result.total, 354.38));
   it('9 líneas (añade exceso P1)', () => {
     expect(result.lines).toHaveLength(9);
   });
   it('líneas ordenadas', () => assertLinesOrdered(result.lines));
   it('sum(lines.amount) === total', () => assertLineSumEqualsTotal(result.lines, result.total));
-  it('P2 no genera exceso (dentro de umbral)', () => {
+  it('P2 no genera exceso (9.5 ≤ 10 contratada)', () => {
     const excessLines = result.lines.filter(l => l.concept.startsWith('Exceso'));
     expect(excessLines).toHaveLength(1);
     expect(excessLines[0].period).toBe(1);
@@ -167,12 +170,13 @@ describe('TC-PRE-004 — 3.0TD, exceso en P1', () => {
 
   it('powerTerm igual TC-PRE-003', () => expectEur(result.powerTerm, 441.19));
   it('energyTerm igual TC-PRE-003', () => expectEur(result.energyTerm, 2187.23));
-  it('excessPower (P1)', () => expectEur(result.excessPower, 62.56));
-  it('ieeBase', () => expectEur(result.ieeBase, 2690.98));
-  it('ieeAmount', () => expectEur(result.ieeAmount, 137.58));
-  it('subtotal', () => expectEur(result.subtotal, 2829.75));
-  it('vatAmount', () => expectEur(result.vatAmount, 594.25));
-  it('total', () => expectEur(result.total, 3424.00));
+  // Exceso P1 = (58 − 50) × 0.070000 €/kW·día × 30 días = 16.80 € (fórmula real art. 9.4.b.1)
+  it('excessPower (P1)', () => expectEur(result.excessPower, 16.80));
+  it('ieeBase', () => expectEur(result.ieeBase, 2645.23));
+  it('ieeAmount', () => expectEur(result.ieeAmount, 135.24));
+  it('subtotal', () => expectEur(result.subtotal, 2781.66));
+  it('vatAmount', () => expectEur(result.vatAmount, 584.15));
+  it('total', () => expectEur(result.total, 3365.81));
   it('solo línea de exceso en P1', () => {
     const excessLines = result.lines.filter(l => l.concept.startsWith('Exceso'));
     expect(excessLines).toHaveLength(1);

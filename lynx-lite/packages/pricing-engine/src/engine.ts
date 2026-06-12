@@ -1,4 +1,5 @@
 import type { PricingInput, PricingResult, PricingLine } from './types.js';
+import { computeExcessTerm } from './excess.js';
 
 export function calculate(input: PricingInput): PricingResult {
   const lines: PricingLine[] = [];
@@ -7,12 +8,10 @@ export function calculate(input: PricingInput): PricingResult {
   // Paso 1 — Término de potencia
   const powerPeriods = Object.keys(input.contractedPower).sort();
   let powerTerm = 0;
-  const combinedPowerRate: Record<string, number> = {};
 
   for (const p of powerPeriods) {
     const periodNum = parseInt(p.slice(1), 10);
     const rate = (input.tollRates.power[p] ?? 0) + (input.chargeRates.power[p] ?? 0);
-    combinedPowerRate[p] = rate;
     const kwDays = input.contractedPower[p] * input.periodDays;
     const amount = kwDays * rate;
     powerTerm += amount;
@@ -51,31 +50,26 @@ export function calculate(input: PricingInput): PricingResult {
     });
   }
 
-  // Paso 3 — Excesos de potencia (solo MAXIMETRO)
-  let excessPower = 0;
+  // Paso 3 — Excesos de potencia (art. 9.4.b.1, tipos 4 y 5; solo MAXIMETRO)
+  const excess = computeExcessTerm({
+    modePowerControl: input.modePowerControl,
+    contractedPower: input.contractedPower,
+    maxPower: input.maxPower,
+    excessRates: input.excessRates,
+    days: input.periodDays,
+  });
+  const excessPower = excess.total;
 
-  if (input.modePowerControl === 'MAXIMETRO' && input.maxPower !== null) {
-    for (const p of powerPeriods) {
-      const periodNum = parseInt(p.slice(1), 10);
-      const contracted = input.contractedPower[p];
-      const measured = input.maxPower[p] ?? 0;
-
-      if (measured > contracted * 1.05) {
-        const excessKw = measured - contracted;
-        const rate = combinedPowerRate[p];
-        const amount = excessKw * rate * input.periodDays * 2;
-        excessPower += amount;
-        lines.push({
-          concept: `Exceso de potencia ${p}`,
-          period: periodNum,
-          quantity: excessKw,
-          unit: 'kW',
-          unitPrice: rate * input.periodDays * 2,
-          amount,
-          sortOrder: ++sortOrder,
-        });
-      }
-    }
+  for (const l of excess.lines) {
+    lines.push({
+      concept: `Exceso de potencia P${l.period}`,
+      period: l.period,
+      quantity: l.excessKw,
+      unit: 'kW',
+      unitPrice: l.tepPerDay * l.days, // €/kW para el tramo de facturación
+      amount: l.amount,
+      sortOrder: ++sortOrder,
+    });
   }
 
   // Paso 4 — Energía reactiva (solo 3.0TD con datos; P6 excluido)

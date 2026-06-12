@@ -1,7 +1,7 @@
 # SPECS.md — lynx-lite
 
-**Version**: 0.2-DRAFT  
-**Fecha**: 2026-06-09  
+**Version**: 0.3-DRAFT  
+**Fecha**: 2026-06-12  
 **Estado**: Pendiente de aprobación
 
 ---
@@ -11,7 +11,8 @@
 1. [Arquitectura general](#1-arquitectura-general)
 2. [Sistema de usuarios y autenticación](#2-sistema-de-usuarios-y-autenticación)
 3. [M01 — Pre-factura automática](#3-m01--pre-factura-automática)
-4. [Convenciones de test](#4-convenciones-de-test)
+4. [M02 — Optimización de potencia contratada](#4-m02--optimización-de-potencia-contratada)
+5. [Convenciones de test](#5-convenciones-de-test)
 
 ---
 
@@ -478,7 +479,7 @@ type Query {
 | DATADIS | `GET /api-private/api/get-max-power` | Potencia máxima registrada por período por mes (en **Vatios**) |
 | DATADIS | `GET /api-private/api/get-reactive-data-v2` | Energía reactiva mensual por período (kVArh). Solo 3.0TD. |
 | ESIOS   | `GET /indicators/1001` | Precio PVPC horario (€/MWh, header `x-api-key` requerido) |
-| PostgreSQL | maestros regulatorios | Peajes CNMC, cargos TED, IEE, IVA, alquiler contador, tarifas reactiva (versionados por fecha) |
+| PostgreSQL | maestros regulatorios | Peajes CNMC, cargos TED, IEE, IVA, alquiler contador, tarifas reactiva, término de exceso de potencia (`tepp4-5`, solo maxímetro) — versionados por fecha |
 
 > **Nota de alcance reactiva**: DATADIS V2 expone `get-reactive-data-v2`, que devuelve kVArh
 > mensual agregado por período. Solo aplica a suministros con potencia contratada > 15 kW
@@ -606,6 +607,20 @@ model MeterRentalRate {
   eurPerDay  Float
   validFrom  DateTime
   validTo    DateTime?
+}
+
+// Término de exceso de potencia tepp4-5 (€/kW·día), tipos de medida 4 y 5.
+// Art. 9.4.b.1 Circular CNMC 3/2020 consolidada (1/2025). Compartido por M01 y M02.
+// ⚠️ Los valores que se siembran hoy (seed.ts / demo) son SINTÉTICOS de test; los oficiales
+// se toman de la Resolución de peajes vigente del BOE y se cargan versionados por fecha.
+model ExcessPowerRate {
+  id        String    @id @default(uuid())
+  tariff    Tariff
+  period    Int       // 1–6
+  eurPerDay Float      // tepp4-5 en €/kW·día
+  validFrom DateTime
+  validTo   DateTime?
+  @@unique([tariff, period, validFrom])
 }
 
 // Tarifas de energía reactiva inductiva (Circular CNMC 3/2020, Art. 9.5)
@@ -748,6 +763,10 @@ interface PricingInput {
   // Null si modePowerControl === 'ICP' (no aplica)
   maxPower: Record<string, number> | null; // kW (ya convertido de W)
 
+  // Término de exceso tepp4-5 (€/kW·día) por power period. Origen: ExcessPowerRate.
+  // {} si modePowerControl === 'ICP' (no se usa).
+  excessRates: Record<string, number>;
+
   // Precio PVPC medio ponderado por energía consumida en cada período
   // 2.0TD: { P1, P2, P3 } | 3.0TD: { P1..P6 }
   pvpcPrice: Record<string, number>;       // €/kWh
@@ -828,30 +847,32 @@ energyTerm[Pi]      = consumption[Pi] × totalEnergyRate[Pi]
 energyTerm = Σ energyTerm[Pi]
 ```
 
-#### Paso 3 — Excesos de potencia
+#### Paso 3 — Excesos de potencia (fórmula regulatoria real, tipos 4 y 5)
 
-Solo aplica si `modePowerControl === 'MAXIMETRO'` y `maxPower !== null`.
+Implementado por la función pura compartida `computeExcessTerm()` (art. 9.4.b.1 de la
+Circular CNMC 3/2020 consolidada con 1/2025, vigente desde 1-abril-2025). La usan tanto M01
+(un tramo = período de facturación) como M02 (un tramo por mes).
 
-Para cada power period `Pi`:
-
-```
-umbral[Pi] = contractedPower[Pi] × 1.05
-
-Si maxPower[Pi] > umbral[Pi]:
-  excessKw[Pi]    = maxPower[Pi] - contractedPower[Pi]
-  excessPower[Pi] = excessKw[Pi] × totalPowerRate[Pi] × periodDays × 2
-Si maxPower[Pi] ≤ umbral[Pi]:
-  excessPower[Pi] = 0
-```
-
-> El factor `× 2` es el multiplicador regulatorio por exceso de potencia.
-> Se aplica sobre la **tarifa completa del período** (peaje + cargo) y sobre
-> los días del período de facturación, al igual que el término normal de potencia.
-> El exceso se cobra **adicionalmente** al término de potencia base.
+Solo aplica si `modePowerControl === 'MAXIMETRO'` y `maxPower !== null` (con ICP no hay excesos:
+salta el interruptor). Para cada power period `Pi` con `maxPower[Pi] > contractedPower[Pi]`:
 
 ```
-excessPower = Σ excessPower[Pi]
+excessKw[Pi]    = maxPower[Pi] − contractedPower[Pi]
+excessPower[Pi] = excessRates[Pi] × excessKw[Pi] × periodDays   // tepp4-5 €/kW·día × kW × n
 ```
+
+```
+excessPower = Σ excessPower[Pi]   // FEP = Σp tepp4-5 × (Pdp − Pcp) × n
+```
+
+> **Sin** raíz cuadrada, **sin** factor ×2 y **sin** banda del 1.05: la banda 85%/105% era del
+> RD 1164/2001 (derogado) y el ×2/√Σ son de fórmulas previas a 2025 o de tipos 1–3 (6.xTD, fuera
+> de alcance). Se cobra desde el primer kW por encima de lo contratado, sobre el término de exceso
+> `tepp4-5` (no sobre el peaje+cargo), adicionalmente al término de potencia base.
+>
+> `maxPower[Pi]` es la potencia máxima demandada del período (`Pdp`, del measurement `max_power`).
+> El resolver exige `ExcessPowerRate` para todos los períodos solo si el contrato es MAXIMETRO;
+> si falta, eleva `REGULATORY_DATA_MISSING`.
 
 #### Paso 4 — Energía reactiva
 
@@ -1071,6 +1092,7 @@ típico de pyme, sin excesos de potencia (ICP), sin reactiva.
   contractedPower: { P1: 10.0, P2: 10.0 },
   consumption:     { P1: 500.0, P2: 800.0, P3: 1200.0 },
   maxPower: null,
+  excessRates: {},  // ICP: no se usa
   pvpcPrice:       { P1: 0.14000, P2: 0.10000, P3: 0.06000 },
   tollRates: {
     power:  { P1: 0.115327, P2: 0.002572 },
@@ -1120,16 +1142,17 @@ típico de pyme, sin excesos de potencia (ICP), sin reactiva.
 
 **Módulo**: `pricing-engine`  
 **Descripción**: mismo escenario que TC-PRE-001 pero con maxímetro y potencia máxima
-registrada en P1 que supera el umbral del 5%.
+registrada en P1 que supera la contratada (fórmula real art. 9.4.b.1).
 
 **Input**: igual que TC-PRE-001 excepto:
 
 ```typescript
 {
   modePowerControl: 'MAXIMETRO',
-  maxPower: { P1: 11.5, P2: 9.5 }
-  // P1: 11.5 kW > umbral 10.0 × 1.05 = 10.5 kW → exceso
-  // P2: 9.5 kW ≤ umbral 10.5 kW → sin exceso
+  maxPower: { P1: 11.5, P2: 9.5 },
+  excessRates: { P1: 0.060000, P2: 0.060000 }  // tepp4-5 €/kW·día (sintético de test)
+  // P1: 11.5 kW > 10.0 contratada → exceso
+  // P2: 9.5 kW ≤ 10.0 contratada → sin exceso
 }
 ```
 
@@ -1139,14 +1162,16 @@ registrada en P1 que supera el umbral del 5%.
 |-------|---------|----------------|
 | `powerTerm` | igual TC-PRE-001 | 40.27 € |
 | `energyTerm` | igual TC-PRE-001 | 234.81 € |
-| `excessPower` (P1) | (11.5−10.0) × (0.115327+0.011000) × 31 × 2 | **11.75 €** |
-| `excessPower` (P2) | 0 (dentro de umbral) | 0.00 € |
-| **`excessPower`** | | **11.75 €** |
-| `ieeBase` | 40.27 + 234.81 + 11.75 | **286.83 €** |
-| `ieeAmount` | 286.83 × 0.0511269632 | **14.66 €** |
-| `subtotal` | 286.83 + 14.66 + 0.81 | **302.30 €** |
-| `vatAmount` | 302.30 × 0.21 | **63.48 €** |
-| **`total`** | | **365.78 €** |
+| `excessPower` (P1) | (11.5−10.0) × 0.060000 × 31 | **2.79 €** |
+| `excessPower` (P2) | 0 (9.5 ≤ 10.0 contratada) | 0.00 € |
+| **`excessPower`** | | **2.79 €** |
+| `ieeBase` | powerTerm + energyTerm + 2.79 (sin redondeo) | **277.86 €** |
+| `ieeAmount` | 277.86 × 0.0511269632 | **14.21 €** |
+| `subtotal` | 277.86 + 14.21 + 0.81 | **292.88 €** |
+| `vatAmount` | 292.88 × 0.21 | **61.50 €** |
+| **`total`** | | **354.38 €** |
+
+> Valores idénticos a los del test `pricing-engine` TC-PRE-002 (validados sin redondeo intermedio, ver §3.4).
 
 **Verificaciones adicionales**:
 - `lines` contiene 9 registros (añade la línea de exceso P1 respecto a TC-PRE-001).
@@ -1168,7 +1193,8 @@ registrada en P1 que supera el umbral del 5%.
   contractedPower: { P1: 50.0, P2: 50.0, P3: 50.0, P4: 50.0, P5: 50.0, P6: 50.0 },
   consumption:     { P1: 2000, P2: 3000, P3: 4000, P4: 1500, P5: 2500, P6: 5000 },
   maxPower:        { P1: 48.0, P2: 47.0, P3: 49.0, P4: 46.0, P5: 48.0, P6: 47.0 },
-  // Todos < 50 × 1.05 = 52.5 → sin excesos
+  // Todos ≤ 50.0 contratada → sin excesos (con MAXIMETRO requiere excessRates, aquí no hay exceso)
+  excessRates:     { P1: 0.070000, P2: 0.060000, P3: 0.040000, P4: 0.040000, P5: 0.020000, P6: 0.020000 },
   pvpcPrice:       { P1: 0.18, P2: 0.14, P3: 0.10, P4: 0.16, P5: 0.12, P6: 0.07 },
   tollRates: {
     power:  { P1: 0.115327, P2: 0.082748, P3: 0.024894, P4: 0.024894, P5: 0.003695, P6: 0.002572 },
@@ -1218,22 +1244,25 @@ registrada en P1 que supera el umbral del 5%.
 #### TC-PRE-004 — 3.0TD con exceso en P1
 
 **Módulo**: `pricing-engine`  
-**Descripción**: igual que TC-PRE-003 pero `maxPower.P1 = 58.0 kW` (supera umbral 52.5 kW).
+**Descripción**: igual que TC-PRE-003 pero `maxPower.P1 = 58.0 kW` (supera la contratada 50 kW).
 
-**Input**: igual TC-PRE-003 excepto `maxPower: { P1: 58.0, P2: 47.0, ..., P6: 47.0 }`.
+**Input**: igual TC-PRE-003 excepto `maxPower: { P1: 58.0, P2: 47.0, ..., P6: 47.0 }` y
+`excessRates: { P1: 0.070000, P2: 0.060000, P3: 0.040000, P4: 0.040000, P5: 0.020000, P6: 0.020000 }` (tepp4-5 €/kW·día, sintético de test).
 
 **Output esperado**:
 
 | Campo | Cálculo | Valor esperado |
 |-------|---------|----------------|
 | `powerTerm` | igual TC-PRE-003 | 441.19 € |
-| `energyTerm` | igual TC-PRE-003 | 2187.25 € |
-| `excessPower` (P1) | (58.0−50.0) × 0.130327 × 30 × 2 | **62.56 €** |
-| `ieeBase` | 441.19 + 2187.25 + 62.56 | **2691.00 €** |
-| `ieeAmount` | 2691.00 × 0.0511269632 | **137.58 €** |
-| `subtotal` | 2691.00 + 137.58 + 1.19 | **2829.77 €** |
-| `vatAmount` | 2829.77 × 0.21 | **594.25 €** |
-| **`total`** | | **3424.02 €** |
+| `energyTerm` | igual TC-PRE-003 (sin redondeo 2187.231) | 2187.23 € |
+| `excessPower` (P1) | (58.0−50.0) × 0.070000 × 30 | **16.80 €** |
+| `ieeBase` | 441.195 + 2187.231 + 16.80 (sin redondeo) | **2645.23 €** |
+| `ieeAmount` | 2645.23 × 0.0511269632 | **135.24 €** |
+| `subtotal` | 2645.23 + 135.24 + 1.19 | **2781.66 €** |
+| `vatAmount` | 2781.66 × 0.21 | **584.15 €** |
+| **`total`** | | **3365.81 €** |
+
+> Valores idénticos a los del test `pricing-engine` TC-PRE-004 (validados sin redondeo intermedio, ver §3.4).
 
 ---
 
@@ -1599,11 +1628,510 @@ que corresponde a cos φ < 0,80), activando el tramo 2 más penalizador.
 
 ---
 
-## 4. Convenciones de test
+## 4. M02 — Optimización de potencia contratada
+
+Analiza el histórico de demanda de un suministro y recomienda la **potencia óptima a
+contratar por período** (P1–P2 en 2.0TD; P1–P6 en 3.0TD), estima el **ahorro anual** de
+aplicar la recomendación y diagnostica **sobredimensionamiento** e **infradimensionamiento**.
+Es una herramienta de análisis (no factura): no escribe en InfluxDB ni llama a APIs externas
+durante el cálculo.
+
+### 4.0 Decisiones de diseño (premisas de este módulo)
+
+> Estas decisiones se tomaron al especificar M02 porque el brief asumía datos cuarto-horarios
+> del maxímetro que DATADIS **no** expone de forma fiable. Quedan registradas para poder revertirlas.
+>
+> **Fundamento regulatorio**: la fórmula de excesos y la metodología de optimización siguen la
+> **Circular CNMC 3/2020** consolidada con la **Circular 1/2025** (vigente desde 1-abril-2025).
+> El art. 8.9 de la Circular define un procedimiento oficial de optimización de potencias
+> (minimizar la facturación de peajes dada la curva de carga) — M02 se alinea con esa metodología.
+
+> **Alcance de tarifas y excesos**: el producto soporta 2.0TD y 3.0TD, que corresponden a
+> **puntos de medida tipo 4 y 5**. La fórmula de excesos aplicable es la del art. 9.4.b.1 (tipos
+> 4 y 5). La fórmula con raíz cuadrada y coeficientes `Kp` (art. 9.4.b.2, tipos 1–3) aplica a
+> 6.xTD y queda **fuera de alcance** en v1. En **2.0TD con control por ICP no hay excesos**
+> (salta el interruptor): el término de potencia demandada es 0; solo aplica con maxímetro.
+
+> **Fase previa (corrección de M01) — HECHA**: el modelo de excesos de M01 (§3.4 Paso 3) ya se
+> ha reemplazado por `computeExcessTerm()` con la fórmula regulatoria real (`FEP = Σp tepp4-5 ×
+> (Pdp − Pcp) × n`), con el nuevo maestro `ExcessPowerRate`. M01 y M02 comparten esa función, de
+> modo que la pre-factura y el ahorro usan exactamente el mismo cálculo de excesos. Las tablas
+> TC-PRE-002 y TC-PRE-004 se recalcularon; suite verde.
+
+1. **Fuente de la potencia para el percentil**: se usa la **curva de carga** ya ingestada
+   (`hourly_consumption`), derivando potencia por intervalo `kW = kWh / horasDelIntervalo`.
+   El percentil 99 solo tiene sentido estadístico sobre una distribución (~8 760 puntos/año);
+   sobre los 12–24 máximos mensuales de `max_power` degeneraría en el máximo. **Limitación
+   asumida**: la potencia derivada de energía horaria es la *media del intervalo*, no el pico
+   instantáneo del maxímetro, por lo que **subestima**. Se corrige con el coeficiente de uplift
+   del punto siguiente. `max_power` se mantiene como contraste y como señal del diagnóstico.
+
+2. **Coeficiente de granularidad (1.05)**: si la curva está en resolución **horaria**, la
+   potencia óptima se multiplica por **1.05** para compensar la pérdida de pico frente al
+   cuarto de hora real. Si la curva está en **15 min**, el uplift es **1.00** (sin corrección).
+
+3. **Regla de infradimensionamiento reinterpretada**: el brief la define como "excesos en
+   > 2 % de los **cuartos de hora** del mes". Al no disponer de cuartos de hora, se reinterpreta
+   como "> `undersizeRatio` (default **2 %**) de los **intervalos de la curva** del mes con
+   potencia derivada > potencia contratada", reforzada por `max_power` mensual > Pc.
+
+4. **Ahorro coherente con M01 (fórmula real)**: tanto el término de potencia como el de excesos
+   se calculan con la **misma** lógica que la pre-factura, mediante funciones puras compartidas
+   exportadas por el `pricing-engine`:
+   - `computePowerTerm()` — refactor del Paso 1 de §3.4 (término de potencia contratada).
+   - `computeExcessTerm()` — **nueva** función con la fórmula regulatoria real para tipos 4 y 5
+     (art. 9.4.b.1 de la Circular 3/2020 consolidada): `FEP = Σp tepp4-5 × (Pdp − Pcp) × n`,
+     donde `tepp4-5` está en €/kW·día (maestro `ExcessPowerRate`, versionado), `Pdp` es la
+     potencia máxima demandada del período (= `max_power`), `Pcp` la contratada y `n` los días.
+     **Sin** raíz cuadrada, **sin** ×2, **sin** `Kp` (eso era la fórmula previa a 2025 o la de
+     tipos 1–3). Esta función reemplaza el modelo erróneo del Paso 3 de §3.4 en la fase previa.
+
+### 4.1 Fuentes de datos
+
+| Fuente | Endpoint / origen | Dato obtenido | Uso en M02 |
+|--------|-------------------|---------------|------------|
+| InfluxDB | measurement `hourly_consumption` | Curva horaria de consumo (kWh por hora y período) | Construcción de la muestra de potencia y del percentil 99 |
+| InfluxDB | measurement `max_power` | Máximo mensual por período (kW) | Diagnóstico de dimensionamiento y contraste del percentil |
+| PostgreSQL | `Contract` (último vigente) | Potencias contratadas actuales, `modePowerControl`, `validFrom` | Comparación actual vs óptima y fecha del último cambio |
+| PostgreSQL | `TollRate` + `ChargeRate` (POWER) | Peajes y cargos €/kW/día por período | Cálculo del ahorro (término de potencia) |
+| PostgreSQL | `ExcessPowerRate` (nuevo maestro) | Término de exceso `tepp4-5` €/kW·día por tarifa y período | Cálculo del coste de excesos (`computeExcessTerm`) |
+
+> **Sin ingesta nueva**: M02 consume datos que ya carga M01 (`hourly_consumption`, `max_power`)
+> mediante el backfill de onboarding y los jobs periódicos (§1.5). No añade measurements ni jobs.
+> No se llama a DATADIS/ESIOS durante `calculatePowerOptimization`.
+>
+> **Histórico mínimo**: el análisis requiere al menos **12 meses** de curva para que el percentil
+> y la detección de 6 meses consecutivos sean significativos. Ventana recomendada: **12–24 meses**.
+> Si hay menos, se eleva `INSUFFICIENT_HISTORY`.
+
+### 4.2 Modelos Prisma
+
+```prisma
+// ─── Maestro regulatorio: término de exceso de potencia (tipos 4 y 5) ────────
+// Introducido en la fase previa de corrección de excesos de M01; lo consumen M01 y M02.
+// Valores oficiales (€/kW·día) de la Resolución de peajes vigente, versionados por fecha.
+model ExcessPowerRate {
+  id        String   @id @default(uuid())
+  tariff    Tariff
+  period    Int      // 1–6
+  eurPerDay Float    // tepp4-5 en €/kW·día
+  validFrom DateTime
+  validTo   DateTime?
+  @@unique([tariff, period, validFrom])
+}
+
+// ─── Resultado de optimización de potencia (M02) ─────────────────────────────
+
+model PowerOptimization {
+  id                 String   @id @default(uuid())
+  supplyId           String
+  supply             Supply   @relation(fields: [supplyId], references: [id])
+  tariff             Tariff
+  analysisFrom       DateTime
+  analysisTo         DateTime
+  granularity        String    // "hourly" | "quarter" — resolución de la curva analizada
+  upliftFactor       Float     // 1.05 (hourly) | 1.00 (quarter)
+  sampleCount        Int       // nº de puntos de potencia usados en el percentil
+  // Ahorro estimado anualizado (€/año)
+  fixedSaving        Float     // Δ término de potencia (peajes+cargos × 365 días)
+  excessSaving       Float     // Δ coste de excesos evitados (computeExcessTerm, art. 9.4.b.1)
+  annualSaving       Float     // fixedSaving + excessSaving
+  recommendChange    Boolean   // true si annualSaving supera el umbral mínimo y hay desvío
+  // Restricción de un cambio de potencia al año por distribuidora
+  changeAllowed      Boolean   // false si hubo un cambio en los últimos 365 días
+  changeBlockedUntil DateTime? // fecha hasta la que no se puede volver a cambiar; null si changeAllowed
+  periods            PowerOptimizationPeriod[]
+  createdAt          DateTime  @default(now())
+  @@unique([supplyId, analysisFrom, analysisTo])  // idempotencia de savePowerOptimization
+}
+
+model PowerOptimizationPeriod {
+  id             String            @id @default(uuid())
+  optimizationId String
+  optimization   PowerOptimization @relation(fields: [optimizationId], references: [id])
+  period         Int               // 1–6 (power period)
+  currentPower   Float             // kW contratados actualmente
+  optimalPower   Float             // kW recomendados (tras uplift y restricción monótona)
+  p99Power       Float             // kW — percentil 99 de la muestra de potencia del período
+  observedMax    Float             // kW — máximo de los máximos mensuales (max_power) del período
+  diagnosis      String            // "OK" | "OVERSIZED" | "UNDERSIZED"
+  marginPct      Float             // (optimalPower − currentPower) / currentPower × 100 (informativo)
+  @@unique([optimizationId, period])
+}
+```
+
+> **Cambio en `Supply`**: añadir la relación inversa `powerOptimizations PowerOptimization[]`.
+> No se modifica ningún otro modelo de M01. El campo `validFrom` de `Contract` ya existe y se
+> reutiliza para determinar la fecha del último cambio de potencia (cada cambio genera un nuevo
+> snapshot de contrato).
+
+### 4.3 Esquema InfluxDB
+
+M02 **no define measurements nuevos**. Lee `hourly_consumption` (§3.3) para construir la muestra
+de potencia y `max_power` (§3.3) para el diagnóstico. La asignación de período horario→período de
+potencia se hace con el mismo calendario tarifario de la ingesta (§3.3).
+
+> En 2.0TD la curva tiene 3 períodos de **energía** (P1–P3) pero solo 2 de **potencia** (P1 punta/llano,
+> P2 valle). El resolver agrupa los intervalos de energía en los 2 períodos de potencia antes de
+> pasar la muestra al engine. En 3.0TD períodos de energía y potencia coinciden (P1–P6).
+
+### 4.4 Algoritmo de cálculo — paso a paso
+
+El cálculo puro vive en un módulo nuevo **`packages/optimization-engine`** (mismo patrón que
+`pricing-engine`: sin I/O, sin Prisma, sin InfluxDB; 100 % testeable con datos sintéticos).
+Reutiliza `computePowerTerm()` y `computeExcessTerm()` exportados por `pricing-engine`. El resolver
+de `apps/api` carga la curva desde InfluxDB, deriva la muestra de potencia por período y la pasa al engine.
+
+#### Interfaz del optimization-engine
+
+```typescript
+// ─── Input ────────────────────────────────────────────────────────────────────
+
+interface OptimizationInput {
+  tariff: 'T_2_0TD' | 'T_3_0TD';
+  granularity: 'hourly' | 'quarter';
+
+  // Potencias contratadas actuales (kW). 2.0TD: { P1, P2 } | 3.0TD: { P1..P6 } (power periods)
+  contractedPower: Record<string, number>;
+
+  // Muestra de potencia derivada de la curva (kW), por power period.
+  // El resolver la construye: kW = kWh / horasDelIntervalo, agrupado por período.
+  powerSamplesByPeriod: Record<string, number[]>;
+
+  // Percentil 99 mensual de la curva, por período y mes (para detección de sobredimensionamiento).
+  // Clave externa: "YYYY-MM"; interna: power period → p99 de ese mes.
+  monthlyP99ByPeriod: Record<string, Record<string, number>>;
+
+  // Máximos mensuales reales (max_power), por período y mes (Pdp del exceso). Clave: "YYYY-MM".
+  // Se usa tanto para el diagnóstico como para computeExcessTerm.
+  monthlyMaxByPeriod: Record<string, Record<string, number>>;
+
+  // Días de facturación de cada mes de la ventana (n de la fórmula de excesos). Clave: "YYYY-MM".
+  daysByMonth: Record<string, number>;
+
+  // Control de potencia: 'ICP' → sin excesos (2.0TD); 'MAXIMETRO' → aplica computeExcessTerm.
+  modePowerControl: 'ICP' | 'MAXIMETRO';
+
+  // Recuento de intervalos del mes con potencia > contratada, por período y mes (infradimensionamiento).
+  overContractedRatioByPeriod: Record<string, Record<string, number>>; // ratio 0..1 por "YYYY-MM"
+
+  // Tarifas de potencia (€/kW/día) por período. Origen: TollRate + ChargeRate (POWER).
+  tollRatesPower: Record<string, number>;
+  chargeRatesPower: Record<string, number>;
+
+  // Término de exceso de potencia tepp4-5 (€/kW·día) por período. Origen: ExcessPowerRate.
+  excessRatesPower: Record<string, number>;
+
+  // Parámetros de configuración (con defaults si el resolver no los pasa)
+  oversizeFactor?: number;   // default 0.70 — umbral de sobredimensionamiento
+  oversizeMonths?: number;   // default 6    — meses consecutivos requeridos
+  undersizeRatio?: number;   // default 0.02 — fracción de intervalos en exceso
+  minSavingEur?: number;     // default 0    — ahorro mínimo para recommendChange=true
+
+  // Restricción de un cambio/año
+  lastPowerChangeDate: string | null; // ISO "YYYY-MM-DD" (Contract.validFrom más reciente)
+  analysisTo: string;                  // ISO "YYYY-MM-DD" — fin de la ventana analizada
+}
+
+// ─── Output ───────────────────────────────────────────────────────────────────
+
+interface OptimizationResult {
+  periods: OptimizationPeriod[];
+  fixedSaving: number;        // €/año
+  excessSaving: number;       // €/año
+  annualSaving: number;       // €/año
+  recommendChange: boolean;
+  changeAllowed: boolean;
+  changeBlockedUntil: string | null; // ISO; null si changeAllowed
+  upliftFactor: number;       // 1.05 | 1.00
+  sampleCount: number;
+}
+
+interface OptimizationPeriod {
+  period: number;             // 1–6
+  currentPower: number;       // kW
+  optimalPower: number;       // kW
+  p99Power: number;           // kW
+  observedMax: number;        // kW
+  diagnosis: 'OK' | 'OVERSIZED' | 'UNDERSIZED';
+  marginPct: number;          // %
+}
+```
+
+#### Paso 1 — Percentil 99 de la muestra y uplift
+
+`uplift = (granularity === 'hourly') ? 1.05 : 1.00`.
+
+Para cada power period `Pi` activo según la tarifa (P1–P2 en 2.0TD; P1–P6 en 3.0TD):
+
+```
+p99[Pi]        = percentil(99, powerSamplesByPeriod[Pi])
+optimalRaw[Pi] = p99[Pi] × uplift
+```
+
+> El percentil se calcula por **interpolación lineal** sobre la muestra ordenada (método
+> "linear" / R-7, el de `numpy.percentile` por defecto). Los tests fijan el método para
+> evitar ambigüedad entre implementaciones.
+
+#### Paso 2 — Restricción de monotonía P1 ≤ P2 ≤ … ≤ P6
+
+La normativa exige potencias contratadas **no decrecientes** del período 1 al 6. Se aplica un
+máximo acumulado desde P1:
+
+```
+optimalPower[P1] = optimalRaw[P1]
+optimalPower[Pi] = max(optimalPower[Pi-1], optimalRaw[Pi])   para i = 2..N
+```
+
+> Esto puede elevar la potencia de un período "valle" por encima de su propia demanda si un
+> período anterior la exige. Es el resultado correcto según la restricción regulatoria, no un
+> error de cálculo. En 2.0TD solo se aplica entre P1 y P2.
+
+#### Paso 3 — Diagnóstico por período
+
+Para cada `Pi`:
+
+```
+observedMax[Pi] = max sobre los meses de monthlyMaxByPeriod[mes][Pi]
+marginPct[Pi]   = (optimalPower[Pi] − currentPower[Pi]) / currentPower[Pi] × 100
+
+// Sobredimensionado: p99 mensual < oversizeFactor × Pc durante oversizeMonths meses consecutivos
+mesesSobre = mayor racha de meses consecutivos con monthlyP99ByPeriod[mes][Pi] < oversizeFactor × currentPower[Pi]
+oversized  = mesesSobre ≥ oversizeMonths
+
+// Infradimensionado: algún mes con fracción de intervalos en exceso > undersizeRatio
+undersized = ∃ mes : overContractedRatioByPeriod[mes][Pi] > undersizeRatio
+
+Si undersized:        diagnosis[Pi] = 'UNDERSIZED'
+Si no y oversized:    diagnosis[Pi] = 'OVERSIZED'
+En otro caso:         diagnosis[Pi] = 'OK'
+```
+
+> `UNDERSIZED` tiene prioridad sobre `OVERSIZED`: un período no puede estar simultáneamente
+> infra y sobredimensionado, y el riesgo de penalización por exceso prevalece en el aviso.
+
+#### Paso 4 — Ahorro estimado (reutiliza `computePowerTerm` y `computeExcessTerm`)
+
+**Término de potencia.** `computePowerTerm(power, tollRatesPower, chargeRatesPower, days)` es la
+función pura extraída del Paso 1 de §3.4. Se anualiza con **365 días**:
+
+```
+powerTermCurrent = computePowerTerm(currentPower, tollRatesPower, chargeRatesPower, 365)
+powerTermOptimal = computePowerTerm(optimalPower, tollRatesPower, chargeRatesPower, 365)
+fixedSaving      = powerTermCurrent − powerTermOptimal
+```
+
+**Término de excesos.** `computeExcessTerm()` aplica la fórmula regulatoria real (art. 9.4.b.1,
+tipos 4 y 5). Si `modePowerControl === 'ICP'` el término es 0 (2.0TD con ICP no tiene excesos).
+En otro caso, sobre los meses reales de la ventana (no reescalado: `n` ya son los días de cada mes):
+
+```
+excessCost(power) = Σ_meses Σ_Pi  excessRatesPower[Pi] × max(0, monthlyMaxByPeriod[mes][Pi] − power[Pi]) × daysByMonth[mes]
+excessSaving      = excessCost(currentPower) − excessCost(optimalPower)
+```
+
+> `computeExcessTerm` es la **misma** función que usa M01 tras la fase previa de corrección, de
+> modo que la línea de excesos de la pre-factura y el ahorro de excesos de M02 son consistentes.
+> `max(0, …)` recoge la condición regulatoria "solo períodos en que `Pdp` supere `Pcp`".
+
+```
+annualSaving    = fixedSaving + excessSaving
+recommendChange = annualSaving > minSavingEur  AND  ∃ Pi : diagnosis[Pi] ≠ 'OK'
+```
+
+> Bajar la potencia reduce `fixedSaving` (positivo) pero puede **aumentar** el coste de excesos
+> (`excessSaving` negativo). El óptimo `p99 × 1.05` está dimensionado para que los excesos de la
+> potencia óptima sean ≈ 0, de modo que `excessSaving` recoge sobre todo las penalizaciones
+> **actuales** que se evitarían. `annualSaving` puede ser negativo: en ese caso `recommendChange = false`.
+
+#### Paso 5 — Restricción de un cambio de potencia al año
+
+```
+Si lastPowerChangeDate !== null y (analysisTo − lastPowerChangeDate) < 365 días:
+  changeAllowed      = false
+  changeBlockedUntil = lastPowerChangeDate + 365 días
+Si no:
+  changeAllowed      = true
+  changeBlockedUntil = null
+```
+
+> `changeAllowed = false` **no** anula la recomendación: se muestra el óptimo y el ahorro, pero la
+> UI advierte de que la distribuidora no permitirá el cambio hasta `changeBlockedUntil`.
+
+#### Notas de precisión y redondeo
+
+- Mismo criterio que §3.4: **sin redondeo intermedio**; solo se redondea a 2 decimales (€) o a la
+  precisión de contratación de potencia (kW) **en presentación**. El engine nunca redondea.
+- Los tests de importes validan con tolerancia `±0.01 €`; los de potencia con `±0.001 kW`.
+
+### 4.5 Esquema GraphQL
+
+```graphql
+type PowerOptimizationPeriod {
+  period:       Int!
+  currentPower: Float!
+  optimalPower: Float!
+  p99Power:     Float!
+  observedMax:  Float!
+  diagnosis:    String!   # "OK" | "OVERSIZED" | "UNDERSIZED"
+  marginPct:    Float!
+}
+
+type PowerOptimization {
+  id:                 ID!
+  supplyId:           String!
+  tariff:             Tariff!
+  analysisFrom:       String!   # ISO 8601 "YYYY-MM-DD"
+  analysisTo:         String!
+  granularity:        String!   # "hourly" | "quarter"
+  upliftFactor:       Float!
+  sampleCount:        Int!
+  fixedSaving:        Float!
+  excessSaving:       Float!
+  annualSaving:       Float!
+  recommendChange:    Boolean!
+  changeAllowed:      Boolean!
+  changeBlockedUntil: String     # ISO; null si changeAllowed
+  periods:            [PowerOptimizationPeriod!]!
+  createdAt:          String!
+}
+
+input PowerOptimizationInput {
+  cups:         String!
+  analysisFrom: String!  # "YYYY-MM-DD"
+  analysisTo:   String!  # "YYYY-MM-DD"
+}
+
+extend type Query {
+  # Calcula sin persistir. Lee la curva de InfluxDB; no llama a DATADIS.
+  calculatePowerOptimization(input: PowerOptimizationInput!): PowerOptimization!
+
+  # Recupera una optimización ya guardada.
+  powerOptimization(id: ID!): PowerOptimization
+
+  # Lista las optimizaciones de un suministro, ordenadas por analysisTo desc.
+  powerOptimizations(supplyId: String!, limit: Int, offset: Int): [PowerOptimization!]!
+}
+
+extend type Mutation {
+  # Calcula y persiste. Idempotente por (supplyId, analysisFrom, analysisTo).
+  savePowerOptimization(input: PowerOptimizationInput!): PowerOptimization!
+
+  deletePowerOptimization(id: ID!): Boolean!
+}
+```
+
+**Errores esperados** (formato GraphQL estándar con `extensions.code`):
+
+| Código | Condición |
+|--------|-----------|
+| `SUPPLY_NOT_FOUND` | El CUPS no existe en PostgreSQL |
+| `BACKFILL_PENDING` / `BACKFILL_RUNNING` / `BACKFILL_FAILED` | El histórico aún no está disponible (ver §3.5) |
+| `CONTRACT_NOT_FOUND` | No hay contrato vigente del que leer las potencias actuales |
+| `INSUFFICIENT_HISTORY` | Menos de 12 meses de curva en la ventana solicitada |
+| `NO_CONSUMPTION_DATA` | No hay puntos de `hourly_consumption` utilizables en la ventana |
+| `REGULATORY_DATA_MISSING` | Faltan `TollRate`/`ChargeRate` (POWER) o `ExcessPowerRate` para calcular el ahorro |
+
+### 4.6 Casos de test — contrato de implementación
+
+> Los tests del `optimization-engine` son unitarios (sin I/O). Los del resolver son de
+> integración con Prisma e InfluxDB mockeados. Nomenclatura `TC-OPT-NNN` (§5.1).
+
+#### TC-OPT-001 — Percentil 99 + uplift + monotonía (3.0TD, hourly) — Unit
+
+`granularity: 'hourly'` → `upliftFactor = 1.05`.
+
+| Período | p99 muestra (kW) | optimalRaw = p99×1.05 | optimalPower (tras monotonía) |
+|---------|------------------|-----------------------|-------------------------------|
+| P1 | 30 | 31.5  | 31.5 |
+| P2 | 32 | 33.6  | 33.6 |
+| P3 | 31 | 32.55 | 33.6  *(elevado por P2)* |
+| P4 | 35 | 36.75 | 36.75 |
+| P5 | 40 | 42.0  | 42.0 |
+| P6 | 42 | 44.1  | 44.1 |
+
+Verifica: aplicación del uplift 1.05 y que P3 se eleva a 33.6 por la restricción `optimalPower[Pi] = max(optimalPower[Pi-1], optimalRaw[Pi])`.
+
+#### TC-OPT-002 — 2.0TD con 2 períodos de potencia — Unit
+
+`tariff: T_2_0TD`. La muestra se agrupa en P1 y P2. Verifica que solo se calculan 2 períodos y que se respeta `optimalPower[P1] ≤ optimalPower[P2]`.
+
+#### TC-OPT-003 — Granularidad 15 min → sin uplift — Unit
+
+`granularity: 'quarter'` → `upliftFactor = 1.00`. Con la misma muestra que TC-OPT-001, `optimalRaw[Pi] = p99[Pi]` (sin ×1.05).
+
+#### TC-OPT-004 — Sobredimensionamiento (6 meses consecutivos) — Unit
+
+`currentPower[P1] = 50`. `monthlyP99ByPeriod[P1]` < 35 (= 0.70 × 50) en 6 meses consecutivos → `diagnosis[P1] = 'OVERSIZED'`. Con solo 5 meses consecutivos por debajo → `'OK'`.
+
+#### TC-OPT-005 — Infradimensionamiento (>2 % intervalos en exceso) — Unit
+
+`overContractedRatioByPeriod[P1]` con un mes a `0.03` (> 0.02) → `diagnosis[P1] = 'UNDERSIZED'`. Verifica además que `UNDERSIZED` gana a `OVERSIZED` si ambos se cumplen.
+
+#### TC-OPT-006 — Ahorro por término de potencia (reutiliza computePowerTerm) — Unit
+
+`currentPower = {P1..P6: 40}`, `optimalPower = {31.5, 33.6, 33.6, 36.75, 42, 44.1}`, tarifa de potencia sintética `0.08 €/kW/día` en todos los períodos, 365 días, sin excesos:
+
+```
+powerTermCurrent = 6 × 40 × 0.08 × 365 = 7008.00 €
+powerTermOptimal = (31.5+33.6+33.6+36.75+42+44.1) × 0.08 × 365
+                 = 221.55 × 0.08 × 365 = 6469.26 €
+fixedSaving      = 7008.00 − 6469.26 = 538.74 €/año
+```
+
+Verifica que M02 invoca exactamente la `computePowerTerm` del `pricing-engine` (no una copia).
+
+#### TC-OPT-007 — Ahorro incluye excesos evitados (fórmula real tipos 4/5) — Unit
+
+`modePowerControl: 'MAXIMETRO'`, `tepp4-5 = 0.05 €/kW·día`. Un mes de 30 días con `currentPower[P1] = 30` y `monthlyMaxByPeriod['2025-07'][P1] = 45`; `optimalPower[P1] = 47.25` (dimensionada para no tener excesos):
+
+```
+excessCost(current) = 0.05 × max(0, 45 − 30) × 30 = 0.05 × 15 × 30 = 22.50 €
+excessCost(optimal) = 0.05 × max(0, 45 − 47.25) × 30 = 0.05 × 0 × 30 = 0.00 €
+excessSaving        = 22.50 − 0.00 = 22.50 €
+```
+
+Verifica que `computeExcessTerm` aplica `Σ tepp4-5 × (Pdp − Pcp) × n` (sin √, sin ×2) y que `annualSaving = fixedSaving + excessSaving`.
+
+#### TC-OPT-007b — 2.0TD con ICP → término de excesos = 0 — Unit
+
+`tariff: T_2_0TD`, `modePowerControl: 'ICP'`. Aunque `monthlyMaxByPeriod` contenga valores > Pc, `excessCost(power) = 0` para cualquier potencia → `excessSaving = 0`.
+
+#### TC-OPT-008 — annualSaving negativo → recommendChange false — Unit
+
+Caso donde bajar la potencia ahorra fijo pero dispara excesos (`excessSaving` muy negativo) y `annualSaving < 0` → `recommendChange = false` aunque haya desvío de potencia.
+
+#### TC-OPT-009 — Restricción de un cambio/año — Unit
+
+`lastPowerChangeDate = analysisTo − 200 días` → `changeAllowed = false`, `changeBlockedUntil = lastPowerChangeDate + 365 días`. Con `lastPowerChangeDate = analysisTo − 400 días` → `changeAllowed = true`, `changeBlockedUntil = null`.
+
+#### TC-OPT-010 — Histórico insuficiente → INSUFFICIENT_HISTORY — Integration
+
+Ventana con < 12 meses de `hourly_consumption` → el resolver eleva `INSUFFICIENT_HISTORY` y no invoca al engine.
+
+#### TC-OPT-011 — Sin contrato vigente → CONTRACT_NOT_FOUND — Integration
+
+No hay `Contract` para el CUPS en la fecha → `CONTRACT_NOT_FOUND`.
+
+#### TC-OPT-012 — Faltan maestros de potencia → REGULATORY_DATA_MISSING — Integration
+
+Faltan `TollRate`/`ChargeRate` (POWER) o `ExcessPowerRate` para algún período → `REGULATORY_DATA_MISSING`.
+
+#### TC-OPT-013 — backfillStatus RUNNING → BACKFILL_RUNNING — Integration
+
+Suministro con `backfillStatus = RUNNING` → `BACKFILL_RUNNING` (mismo contrato que §3.7).
+
+#### TC-OPT-014 — savePowerOptimization idempotente — Integration
+
+Dos llamadas con la misma `(supplyId, analysisFrom, analysisTo)` devuelven el mismo registro (no duplican), por el `@@unique`.
+
+---
+
+## 5. Convenciones de test
 
 > Sección transversal. Se replica la estructura `§N.X Casos de test` en cada módulo M02–M06 siguiendo estas mismas convenciones.
 
-### 4.1 Nomenclatura
+### 5.1 Nomenclatura
 
 `TC-{MOD}-{NNN}`
 
@@ -1617,7 +2145,7 @@ que corresponde a cos φ < 0,80), activando el tramo 2 más penalizador.
 | `CO2`  | M05 — Huella de carbono |
 | `SOL`  | M06 — Simulación de autoconsumo solar |
 
-### 4.2 Capas
+### 5.2 Capas
 
 | Capa | Descripción | I/O externo |
 |------|-------------|-------------|
@@ -1627,16 +2155,16 @@ que corresponde a cos φ < 0,80), activando el tramo 2 más penalizador.
 
 Cada caso de test declara su capa en el campo **Módulo** (`— Unit` / `— Integration` / `— E2E`).
 
-Los tests de M01 son Unit e Integration. No se definen tests E2E hasta que exista frontend.
+Los tests de M01 y M02 son Unit e Integration. No se definen tests E2E hasta que exista frontend.
 
-### 4.3 Herramientas
+### 5.3 Herramientas
 
 - **Unit / Integration**: Vitest
 - **Fixtures**: datos sintéticos reutilizables en `apps/api/test/fixtures/`
 - **Mocks HTTP**: `vi.spyOn` sobre los adaptadores de ingesta
-- **Mock DB**: cliente Prisma mockeado con `vitest-mock-extended` o similar; cliente InfluxDB mockeado a nivel de módulo
+- **Mock DB**: cliente Prisma mockeado con `vi.hoisted` (**no** usar `vitest-mock-extended`); cliente InfluxDB mockeado a nivel de módulo
 
-### 4.4 Cobertura mínima por módulo
+### 5.4 Cobertura mínima por módulo
 
 - pricing-engine (o equivalente de cálculo puro): 100 % de ramas del algoritmo
 - Resolvers GraphQL: todos los errores definidos en `§N.5 Errores esperados`

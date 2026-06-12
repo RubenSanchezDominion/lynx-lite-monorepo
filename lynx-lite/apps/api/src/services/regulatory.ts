@@ -14,6 +14,8 @@ export interface RegulatoryRates {
   tollEnergy: Record<string, number>;
   chargePower: Record<string, number>;
   chargeEnergy: Record<string, number>;
+  // tepp4-5 (€/kW·día) por período. {} si no se requiere (ICP).
+  excessPower: Record<string, number>;
   ieeRate: number;
   vatRate: number;
   meterRentalPerDay: number;
@@ -24,24 +26,29 @@ type RateRow = { period: number; rateType: RateType; eur: number };
 
 // Selecciona el valor vigente para el período de facturación: validFrom <= from y
 // (validTo null o >= to). Lanza REGULATORY_DATA_MISSING si falta algún período.
+// `requireExcess` carga y valida el término de exceso (solo aplica con maxímetro).
 export async function loadRegulatoryRates(
   prisma: PrismaClient,
   tariff: Tariff,
   from: Date,
   to: Date,
+  opts: { requireExcess?: boolean } = {},
 ): Promise<RegulatoryRates> {
   const dateFilter = {
     validFrom: { lte: from },
     OR: [{ validTo: null }, { validTo: { gte: to } }],
   };
 
-  const [tolls, charges, iee, vat, meter, reactive] = await Promise.all([
+  const [tolls, charges, iee, vat, meter, reactive, excess] = await Promise.all([
     prisma.tollRate.findMany({ where: { tariff, ...dateFilter } }),
     prisma.chargeRate.findMany({ where: { tariff, ...dateFilter } }),
     prisma.iEERate.findFirst({ where: dateFilter }),
     prisma.vATRate.findFirst({ where: dateFilter }),
     prisma.meterRentalRate.findFirst({ where: { tariff, ...dateFilter } }),
     prisma.reactiveEnergyRate.findMany({ where: dateFilter }),
+    opts.requireExcess
+      ? prisma.excessPowerRate.findMany({ where: { tariff, ...dateFilter } })
+      : Promise.resolve([] as { period: number; eurPerDay: number }[]),
   ]);
 
   if (!iee || !vat || !meter) throw gqlError('REGULATORY_DATA_MISSING', 'Faltan IEE/IVA/alquiler');
@@ -59,6 +66,15 @@ export async function loadRegulatoryRates(
     return out;
   };
 
+  const excessPower: Record<string, number> = {};
+  if (opts.requireExcess) {
+    for (const p of pPeriods) {
+      const row = excess.find(r => r.period === p);
+      if (!row) throw gqlError('REGULATORY_DATA_MISSING', `Falta exceso de potencia P${p} (${tariff})`);
+      excessPower[`P${p}`] = row.eurPerDay;
+    }
+  }
+
   const tier1 = reactive.find(r => r.tier === 1);
   const tier2 = reactive.find(r => r.tier === 2);
 
@@ -67,6 +83,7 @@ export async function loadRegulatoryRates(
     tollEnergy: pick(tolls, 'ENERGY', ePeriods),
     chargePower: pick(charges, 'POWER', pPeriods),
     chargeEnergy: pick(charges, 'ENERGY', ePeriods),
+    excessPower,
     ieeRate: iee.rate,
     vatRate: vat.rate,
     meterRentalPerDay: meter.eurPerDay,
