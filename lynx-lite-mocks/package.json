@@ -1,0 +1,16 @@
+{
+  "name": "lynx-lite-mocks",
+  "version": "1.0.0",
+  "description": "Mock APIs for LYNX Lite development",
+  "scripts": {
+    "start": "bun run start-all.ts",
+    "start:datadis": "bun run services/datadis/server.js",
+    "start:redata": "bun run services/redata/server.ts",
+    "start:esios": "bun run services/esios/server.ts",
+    "start:pvgis": "bun run services/pvgis/server.ts"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "hono": "^4.7.0"
+  }
+}

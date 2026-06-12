@@ -210,4 +210,46 @@ function generateMaxPower(cups, startDate, endDate) {
   return result;
 }
 
-module.exports = { generateConsumption, generateMaxPower, getSupplyProfile };
+// ============================================================
+// GENERADOR DE REACTIVA MENSUAL (get-reactive-data-v2)
+// Un registro por mes y por periodo. Solo aplica a 3.0TD (>15 kW).
+// Para 2.0TD y 6.1TD (fuera de alcance) devuelve array vacio.
+// kVArh ~ fraccion de la activa mensual estimada; P6 con valores bajos.
+// ============================================================
+function generateReactive(cups, startDate, endDate) {
+  const profile = getSupplyProfile(cups);
+  if (profile.tariff !== '3.0TD') return []; // solo 3.0TD reporta reactiva V2
+
+  const [sy, sm] = startDate.split('/').map(Number);
+  const [ey, em] = endDate.split('/').map(Number);
+
+  // Fraccion de reactiva sobre activa por periodo (P1 cargado, P6 casi nulo).
+  const reactiveFractionByPeriod = { '1': 0.42, '2': 0.30, '3': 0.20, '4': 0.15, '5': 0.10, '6': 0.02 };
+  // Activa mensual aproximada por periodo (kWh) derivada del perfil.
+  const monthlyActiveByPeriod = {
+    '1': profile.peakLoad * 60, '2': profile.peakLoad * 70, '3': profile.peakLoad * 80,
+    '4': profile.peakLoad * 30, '5': profile.peakLoad * 50, '6': profile.peakLoad * 100,
+  };
+
+  const result = [];
+  let year = sy, month = sm;
+  while (year < ey || (year === ey && month <= em)) {
+    for (const p of ['1', '2', '3', '4', '5', '6']) {
+      const active = monthlyActiveByPeriod[p];
+      const noise = 0.85 + Math.random() * 0.3;
+      const kvarh = Number((active * reactiveFractionByPeriod[p] * noise).toFixed(3));
+      result.push({
+        cups,
+        date: `${year}/${String(month).padStart(2, '0')}`,
+        period: p,
+        kvarh,
+      });
+    }
+    month++;
+    if (month > 12) { month = 1; year++; }
+  }
+
+  return result;
+}
+
+module.exports = { generateConsumption, generateMaxPower, generateReactive, getSupplyProfile };

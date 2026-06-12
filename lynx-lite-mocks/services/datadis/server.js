@@ -1,5 +1,5 @@
 const express = require('express');
-const { generateConsumption, generateMaxPower, getSupplyProfile } = require('./generators');
+const { generateConsumption, generateMaxPower, generateReactive, getSupplyProfile } = require('./generators');
 const { checkRateLimit, clearRateLimit } = require('./rateLimit');
 
 const app = express();
@@ -200,6 +200,31 @@ app.get('/api-private/api/get-max-power', requireAuth, (req, res) => {
 });
 
 // ============================================================
+// 7. GET REACTIVE DATA V2
+// GET /api-private/api/get-reactive-data-v2
+// Query: cups, distributorCode, startDate (YYYY/MM), endDate (YYYY/MM), authorizedNif
+// Devuelve reactiva mensual por periodo. Solo 3.0TD; resto devuelve [].
+// ============================================================
+app.get('/api-private/api/get-reactive-data-v2', requireAuth, (req, res) => {
+  const { cups, distributorCode, startDate, endDate, authorizedNif } = req.query;
+
+  if (!cups || !distributorCode || !startDate || !endDate) {
+    return res.status(400).json({ error: 'Parametros obligatorios: cups, distributorCode, startDate, endDate' });
+  }
+
+  const key = `reactive:${cups}:${distributorCode}:${startDate}:${endDate}:${authorizedNif || ''}`;
+  if (!checkRateLimit(key)) {
+    console.log(`[RATE LIMIT] ${key}`);
+    return res.status(429).json({ error: 'Consulta ya realizada en las ultimas 24 horas' });
+  }
+
+  console.log(`[REACTIVE] cups=${cups} ${startDate}->${endDate}`);
+  const data = generateReactive(cups, startDate, endDate);
+  console.log(`  -> ${data.length} registros generados`);
+  res.json(data);
+});
+
+// ============================================================
 // UTILIDADES SOLO PARA DESARROLLO
 // ============================================================
 
@@ -227,9 +252,6 @@ app.get('/dev/status', (req, res) => {
 // ARRANQUE
 // ============================================================
 app.listen(PORT, () => {
-  console.log(`\n===================================================`);
-  console.log(`  DATADIS Mock Server — http://localhost:${PORT}`);
-  console.log(`===================================================`);
   console.log(`\nEndpoints disponibles:`);
   console.log(`  POST /nikola-auth/tokens/login`);
   console.log(`  GET  /api-private/api/get-supplies`);
@@ -237,6 +259,7 @@ app.listen(PORT, () => {
   console.log(`  GET  /api-private/api/get-contract-detail`);
   console.log(`  GET  /api-private/api/get-consumption-data`);
   console.log(`  GET  /api-private/api/get-max-power`);
+  console.log(`  GET  /api-private/api/get-reactive-data-v2`);
   console.log(`\nCUPS de prueba:`);
   console.log(`  ES0031000000000001JN  Industrial 3.0TD maximetro 50kW`);
   console.log(`  ES0031000000000002JN  Pyme 2.0TD ICP 9.2kW`);
@@ -245,5 +268,5 @@ app.listen(PORT, () => {
   console.log(`\nUtilidades:`);
   console.log(`  GET  /dev/status`);
   console.log(`  POST /dev/reset-rate-limit`);
-  console.log(`\nUso en LYNX Lite: DATADIS_URL=http://localhost:${PORT}\n`);
+  console.log(`\nStarted server: http://localhost:${PORT}\n`);
 });
