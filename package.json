@@ -3,6 +3,9 @@
   "private": true,
   "workspaces": [
     "lynx-lite-mocks",
-    "lynx-lite"
+    "lynx-lite/apps/api",
+    "lynx-lite/apps/worker",
+    "lynx-lite/packages/pricing-engine",
+    "lynx-lite/packages/data-collector"
   ]
 }
