@@ -1,5 +1,7 @@
 export { calculate } from './engine.js';
 export { computeExcessTerm } from './excess.js';
+export { computePowerTerm } from './power.js';
+export type { PowerTermResult } from './power.js';
 export type {
   PricingInput,
   PricingResult,

@@ -1,29 +1,23 @@
 import type { PricingInput, PricingResult, PricingLine } from './types.js';
 import { computeExcessTerm } from './excess.js';
+import { computePowerTerm } from './power.js';
 
 export function calculate(input: PricingInput): PricingResult {
   const lines: PricingLine[] = [];
   let sortOrder = 0;
 
-  // Paso 1 — Término de potencia
-  const powerPeriods = Object.keys(input.contractedPower).sort();
-  let powerTerm = 0;
-
-  for (const p of powerPeriods) {
-    const periodNum = parseInt(p.slice(1), 10);
-    const rate = (input.tollRates.power[p] ?? 0) + (input.chargeRates.power[p] ?? 0);
-    const kwDays = input.contractedPower[p] * input.periodDays;
-    const amount = kwDays * rate;
-    powerTerm += amount;
-    lines.push({
-      concept: `Término de potencia ${p}`,
-      period: periodNum,
-      quantity: kwDays,
-      unit: 'kW·día',
-      unitPrice: rate,
-      amount,
-      sortOrder: ++sortOrder,
-    });
+  // Paso 1 — Término de potencia (función pura compartida con M02)
+  const power = computePowerTerm(
+    input.contractedPower,
+    input.tollRates.power,
+    input.chargeRates.power,
+    input.periodDays,
+    sortOrder,
+  );
+  const powerTerm = power.total;
+  for (const l of power.lines) {
+    lines.push(l);
+    sortOrder = l.sortOrder;
   }
 
   // Paso 2 — Término de energía

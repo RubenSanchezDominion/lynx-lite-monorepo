@@ -19,6 +19,7 @@
     "@influxdata/influxdb-client": "^1.33.0",
     "@lynx-lite/data-collector": "*",
     "@lynx-lite/pricing-engine": "*",
+    "@lynx-lite/optimization-engine": "*",
     "@prisma/client": "^5.17.0",
     "bcrypt": "^5.1.1",
     "cors": "^2.8.5",

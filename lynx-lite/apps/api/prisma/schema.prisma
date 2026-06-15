@@ -91,6 +91,7 @@ model Supply {
   backfillStatus BackfillStatus @default(PENDING)
   contracts      Contract[]
   preInvoices    PreInvoice[]
+  powerOptimizations PowerOptimization[]
   users          User[]
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
@@ -223,4 +224,45 @@ model PreInvoiceLine {
   unitPrice    Float
   amount       Float
   sortOrder    Int
+}
+
+// ─── Optimización de potencia contratada (M02) ───────────────────────────────
+
+model PowerOptimization {
+  id           String   @id @default(uuid())
+  supplyId     String
+  supply       Supply   @relation(fields: [supplyId], references: [id])
+  tariff       Tariff
+  analysisFrom DateTime
+  analysisTo   DateTime
+  granularity  String // "hourly" | "quarter" — resolución de la curva analizada
+  upliftFactor Float // 1.05 (hourly) | 1.00 (quarter)
+  sampleCount  Int // nº de puntos de potencia usados en el percentil
+  // Ahorro estimado anualizado (€/año)
+  fixedSaving        Float // Δ término de potencia (peajes+cargos × 365 días)
+  excessSaving       Float // Δ coste de excesos evitados (computeExcessTerm, art. 9.4.b.1)
+  annualSaving       Float // fixedSaving + excessSaving
+  recommendChange    Boolean // true si annualSaving supera el umbral mínimo y hay desvío
+  // Restricción de un cambio de potencia al año por distribuidora
+  changeAllowed      Boolean // false si hubo un cambio en los últimos 365 días
+  changeBlockedUntil DateTime? // fecha hasta la que no se puede volver a cambiar; null si changeAllowed
+  periods            PowerOptimizationPeriod[]
+  createdAt          DateTime @default(now())
+
+  @@unique([supplyId, analysisFrom, analysisTo]) // idempotencia de savePowerOptimization
+}
+
+model PowerOptimizationPeriod {
+  id             String            @id @default(uuid())
+  optimizationId String
+  optimization   PowerOptimization @relation(fields: [optimizationId], references: [id], onDelete: Cascade)
+  period         Int // 1–6 (power period)
+  currentPower   Float // kW contratados actualmente
+  optimalPower   Float // kW recomendados (tras uplift y restricción monótona)
+  p99Power       Float // kW — percentil 99 de la muestra de potencia del período
+  observedMax    Float // kW — máximo de los máximos mensuales (max_power) del período
+  diagnosis      String // "OK" | "OVERSIZED" | "UNDERSIZED"
+  marginPct      Float // (optimalPower − currentPower) / currentPower × 100 (informativo)
+
+  @@unique([optimizationId, period])
 }

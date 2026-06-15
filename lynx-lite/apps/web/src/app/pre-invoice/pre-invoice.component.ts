@@ -1,9 +1,9 @@
 import { Component } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { Router } from '@angular/router';
 import { GraphqlService } from '../services/graphql.service';
 import { AuthService } from '../services/auth.service';
+import { TopbarComponent } from '../shared/topbar.component';
 
 interface Line {
   concept: string;
@@ -41,14 +41,9 @@ const CALC = `query($i: PreInvoiceInput!) {
 @Component({
   selector: 'app-pre-invoice',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, TopbarComponent],
   template: `
-    <header class="topbar">
-      <strong>LYNX Lite — Pre-factura (M01)</strong>
-      <span class="spacer"></span>
-      <span class="user" *ngIf="auth.user as u">{{ u.email }} · {{ u.role }}</span>
-      <button class="link" (click)="logout()">Salir</button>
-    </header>
+    <app-topbar section="Pre-factura (M01)" />
 
     <div class="card">
       <div class="form-row">
@@ -117,7 +112,7 @@ export class PreInvoiceComponent {
   error = '';
   result: PreInvoice | null = null;
 
-  constructor(private gql: GraphqlService, public auth: AuthService, private router: Router) {}
+  constructor(private gql: GraphqlService, public auth: AuthService) {}
 
   async calculate(): Promise<void> {
     this.error = '';
@@ -133,10 +128,5 @@ export class PreInvoiceComponent {
     } finally {
       this.loading = false;
     }
-  }
-
-  logout(): void {
-    this.auth.logout();
-    this.router.navigate(['/login']);
   }
 }

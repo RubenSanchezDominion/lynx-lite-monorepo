@@ -124,6 +124,42 @@ export const typeDefs = /* GraphQL */ `
     periodTo: String!
   }
 
+  # ─── Optimización de potencia (M02) ───────────────────────────────────────────
+  type PowerOptimizationPeriod {
+    period: Int!
+    currentPower: Float!
+    optimalPower: Float!
+    p99Power: Float!
+    observedMax: Float!
+    diagnosis: String! # "OK" | "OVERSIZED" | "UNDERSIZED"
+    marginPct: Float!
+  }
+
+  type PowerOptimization {
+    id: ID!
+    supplyId: String!
+    tariff: Tariff!
+    analysisFrom: String!
+    analysisTo: String!
+    granularity: String! # "hourly" | "quarter"
+    upliftFactor: Float!
+    sampleCount: Int!
+    fixedSaving: Float!
+    excessSaving: Float!
+    annualSaving: Float!
+    recommendChange: Boolean!
+    changeAllowed: Boolean!
+    changeBlockedUntil: String # ISO; null si changeAllowed
+    periods: [PowerOptimizationPeriod!]!
+    createdAt: String!
+  }
+
+  input PowerOptimizationInput {
+    cups: String!
+    analysisFrom: String!
+    analysisTo: String!
+  }
+
   # ─── Operaciones ────────────────────────────────────────────────────────────
   type Query {
     me: User!
@@ -134,6 +170,10 @@ export const typeDefs = /* GraphQL */ `
     calculatePreInvoice(input: PreInvoiceInput!): PreInvoice!
     preInvoice(id: ID!): PreInvoice
     preInvoices(supplyId: String!, limit: Int, offset: Int): [PreInvoice!]!
+
+    calculatePowerOptimization(input: PowerOptimizationInput!): PowerOptimization!
+    powerOptimization(id: ID!): PowerOptimization
+    powerOptimizations(supplyId: String!, limit: Int, offset: Int): [PowerOptimization!]!
   }
 
   type Mutation {
@@ -150,5 +190,8 @@ export const typeDefs = /* GraphQL */ `
     createSupply(input: CreateSupplyInput!): Supply!
     savePreInvoice(input: PreInvoiceInput!): PreInvoice!
     deletePreInvoice(id: ID!): Boolean!
+
+    savePowerOptimization(input: PowerOptimizationInput!): PowerOptimization!
+    deletePowerOptimization(id: ID!): Boolean!
   }
 `;

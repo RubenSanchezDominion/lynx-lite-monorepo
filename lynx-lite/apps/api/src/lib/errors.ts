@@ -15,7 +15,10 @@ export type ErrorCode =
   | 'BACKFILL_FAILED'
   | 'CONTRACT_NOT_FOUND'
   | 'NO_CONSUMPTION_DATA'
-  | 'REGULATORY_DATA_MISSING';
+  | 'REGULATORY_DATA_MISSING'
+  // M02
+  | 'INSUFFICIENT_HISTORY'
+  | 'OPTIMIZATION_NOT_FOUND';
 
 export function gqlError(code: ErrorCode, message?: string): GraphQLError {
   return new GraphQLError(message ?? code, { extensions: { code } });

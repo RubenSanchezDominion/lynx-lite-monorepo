@@ -102,6 +102,7 @@ export async function createInMemoryStore() {
   }
 
   const preInvoices: Row[] = [];
+  const powerOptimizations: Row[] = [];
 
   // Helpers de delegate.
   const findUniqueBy = (rows: Row[], where: Row): Row | null => {
@@ -212,6 +213,57 @@ export async function createInMemoryStore() {
       },
     },
 
+    powerOptimization: {
+      findUnique: async ({ where, include }: { where: Row; include?: Row }) => {
+        let row: Row | null = null;
+        if (where.id) row = powerOptimizations.find(o => o.id === where.id) ?? null;
+        else if (where.supplyId_analysisFrom_analysisTo) {
+          const k = where.supplyId_analysisFrom_analysisTo as Row;
+          row = powerOptimizations.find(o =>
+            o.supplyId === k.supplyId &&
+            (o.analysisFrom as Date).getTime() === (k.analysisFrom as Date).getTime() &&
+            (o.analysisTo as Date).getTime() === (k.analysisTo as Date).getTime(),
+          ) ?? null;
+        }
+        return row ? withOptIncludes(row, include, supplies) : null;
+      },
+      findMany: async ({ where, orderBy, take, skip }: { where: Row; include?: Row; orderBy?: Row; take?: number; skip?: number }) => {
+        let list = powerOptimizations.filter(o => o.supplyId === where.supplyId);
+        if (orderBy && (orderBy as Row).analysisTo === 'desc') {
+          list = [...list].sort((a, b) => (b.analysisTo as Date).getTime() - (a.analysisTo as Date).getTime());
+        }
+        if (skip) list = list.slice(skip);
+        if (take !== undefined) list = list.slice(0, take);
+        return list.map(o => ({ ...o, periods: o.periods }));
+      },
+      create: async ({ data, include }: { data: Row; include?: Row }) => {
+        const periods = extractPeriods(data);
+        const row: Row = { id: randomUUID(), createdAt: new Date(), ...stripPeriods(data), periods };
+        powerOptimizations.push(row);
+        return withOptIncludes(row, include, supplies);
+      },
+      update: async ({ where, data, include }: { where: Row; data: Row; include?: Row }) => {
+        const row = powerOptimizations.find(o => o.id === where.id);
+        if (!row) throw new Error('powerOptimization no encontrada');
+        const periods = data.periods ? extractPeriods(data) : (row.periods as Row[]);
+        Object.assign(row, stripPeriods(data), { periods });
+        return withOptIncludes(row, include, supplies);
+      },
+      delete: async ({ where }: { where: Row }) => {
+        const i = powerOptimizations.findIndex(o => o.id === where.id);
+        if (i >= 0) powerOptimizations.splice(i, 1);
+        return {};
+      },
+    },
+
+    powerOptimizationPeriod: {
+      deleteMany: async ({ where }: { where: Row }) => {
+        const o = powerOptimizations.find(p => p.id === where.optimizationId);
+        if (o) o.periods = [];
+        return { count: 0 };
+      },
+    },
+
     tollRate: { findMany: async ({ where }: { where: Row }) => tollRates.filter(r => r.tariff === where.tariff) },
     chargeRate: { findMany: async ({ where }: { where: Row }) => chargeRates.filter(r => r.tariff === where.tariff) },
     iEERate: { findFirst: async () => ieeRates[0] ?? null },
@@ -236,5 +288,23 @@ function stripLines(data: Row): Row {
 function withIncludes(row: Row, include: Row | undefined, supplies: Row[]): Row {
   const out: Row = { ...row };
   if (include?.supply) out.supply = supplies.find(s => s.id === row.supplyId) ?? null;
+  return out;
+}
+
+// ─── utilidades de períodos anidados (data.periods.create) — M02 ───────────────
+function extractPeriods(data: Row): Row[] {
+  const spec = data.periods as { create?: Row[] } | undefined;
+  const created = spec?.create ?? [];
+  return created.map(p => ({ id: randomUUID(), ...p }));
+}
+function stripPeriods(data: Row): Row {
+  const { periods, ...rest } = data;
+  void periods;
+  return rest;
+}
+function withOptIncludes(row: Row, include: Row | undefined, supplies: Row[]): Row {
+  const out: Row = { ...row };
+  if (include?.supply) out.supply = supplies.find(s => s.id === row.supplyId) ?? null;
+  if (include?.periods) out.periods = (row.periods as Row[]) ?? [];
   return out;
 }

@@ -4,15 +4,17 @@ import { expressMiddleware } from '@apollo/server/express4';
 import { typeDefs } from './graphql/typeDefs.js';
 import { resolvers } from './graphql/resolvers/index.js';
 import { buildContext, type ApolloContext } from './context.js';
-import { setDataSource, setIngestion } from './services/runtime.js';
+import { setDataSource, setIngestion, setOptimizationDataSource } from './services/runtime.js';
 import { makeInfluxDataSource } from './services/preInvoiceData.js';
+import { makeInfluxOptimizationDataSource } from './services/powerOptimizationData.js';
 import { makeOnDemandIngestion, makeConsumptionCoverage } from './services/ingestion.js';
 import { createDatadisHttp, createEsiosHttp } from '@lynx-lite/data-collector';
 import { queryApi, writeApi } from './lib/influx.js';
 
 async function main() {
-  // Inicializa el DataSource real (InfluxDB) antes de servir.
+  // Inicializa los DataSources reales (InfluxDB) antes de servir.
   setDataSource(makeInfluxDataSource(queryApi));
+  setOptimizationDataSource(makeInfluxOptimizationDataSource(queryApi));
 
   // Ingesta on-demand (anti-429): comprueba cobertura en InfluxDB antes de llamar a DATADIS.
   const datadis = createDatadisHttp({
