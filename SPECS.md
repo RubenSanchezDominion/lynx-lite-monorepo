@@ -1782,6 +1782,16 @@ model PowerOptimizationPeriod {
 > reutiliza para determinar la fecha del último cambio de potencia (cada cambio genera un nuevo
 > snapshot de contrato).
 
+> **Valores oficiales `tepp4-5` (€/kW·día), Anexo II de la Resolución de peajes.** Vigentes desde
+> **1-ene-2026** (BOE-A-2025-26348): 2.0TD `P1 0,279426 · P2 0,005316`; 3.0TD `P1 0,171373 ·
+> P2 0,090584 · P3 0,028721 · P4 0,021891 · P5 0,006142 · P6 0,006142`. Histórico desde
+> **1-abr-2025** (BOE-A-2025-5341): 2.0TD `P1 0,275041 · P2 0,005297`; 3.0TD `P1 0,168944 ·
+> P2 0,089294 · P3 0,028322 · P4 0,021656 · P5/P6 0,006126`. 2.0TD solo tiene 2 períodos de potencia.
+> En seed/demo se siembran con `validFrom 2020-01-01` para cubrir los períodos de los TC; en
+> producción deben versionarse por su `validFrom` real. **Cifras extraídas del BOE vía herramienta
+> web; verificar contra el PDF oficial antes de facturar a cliente.** La fórmula y la unidad
+> (`FPD = Σ tepp4-5 × (Pdp − Pcp) × n`, €/kW·día, art. 9.4.b.1) quedan confirmadas del texto del BOE.
+
 ### 4.3 Esquema InfluxDB
 
 M02 **no define measurements nuevos**. Lee `hourly_consumption` (§3.3) para construir la muestra
@@ -1901,7 +1911,8 @@ interface OptimizationPeriod {
 
 #### Paso 1 — Percentil 99 de la muestra y uplift
 
-`uplift = (granularity === 'hourly') ? 1.05 : 1.00`.
+`uplift = (granularity === 'hourly') ? upliftHourly : upliftQuarter`, con defaults
+`upliftHourly = 1.05` y `upliftQuarter = 1.00`.
 
 Para cada power period `Pi` activo según la tarifa (P1–P2 en 2.0TD; P1–P6 en 3.0TD):
 
@@ -1913,6 +1924,15 @@ optimalRaw[Pi] = p99[Pi] × uplift
 > El percentil se calcula por **interpolación lineal** sobre la muestra ordenada (método
 > "linear" / R-7, el de `numpy.percentile` por defecto). Los tests fijan el método para
 > evitar ambigüedad entre implementaciones.
+
+> **Uplift configurable (calibración).** El coeficiente es **empírico** (compensa el pico perdido
+> al derivar potencia de energía horaria), no regulatorio. Es un parámetro de entrada del engine
+> (`upliftHourly`/`upliftQuarter`) y el resolver lo lee de las variables de entorno
+> `OPT_UPLIFT_HOURLY`/`OPT_UPLIFT_QUARTER` si están definidas (≥ 1), de modo que se recalibra **sin
+> recompilar**. Un valor bajo **no** produce recomendaciones falsas: el coste de excesos de la
+> potencia óptima se calcula y se **netea** en `excessSaving`/`annualSaving` (Paso 4), y
+> `recommendChange` exige ahorro neto positivo. Si en datos reales el `excessSaving` resultara
+> negativo de forma recurrente, es la señal documentada para subir el uplift por configuración.
 
 #### Paso 2 — Restricción de monotonía P1 ≤ P2 ≤ … ≤ P6
 
@@ -2165,6 +2185,63 @@ Suministro con `backfillStatus = RUNNING` → `BACKFILL_RUNNING` (mismo contrato
 #### TC-OPT-014 — savePowerOptimization idempotente — Integration
 
 Dos llamadas con la misma `(supplyId, analysisFrom, analysisTo)` devuelven el mismo registro (no duplican), por el `@@unique`.
+
+#### TC-OPT-015 — CUPS inexistente → SUPPLY_NOT_FOUND — Integration
+
+El CUPS no existe en PostgreSQL → `SUPPLY_NOT_FOUND`.
+
+#### TC-OPT-016 — sin curva utilizable → NO_CONSUMPTION_DATA — Integration
+
+No hay puntos `gap="false"` en la ventana (`hasUsableData=false`) → `NO_CONSUMPTION_DATA`.
+
+#### TC-OPT-017 — backfill no listo → BACKFILL_PENDING / BACKFILL_FAILED — Integration
+
+`backfillStatus = PENDING` → `BACKFILL_PENDING`; `= FAILED` → `BACKFILL_FAILED` (mismo contrato que §3.7).
+
+#### TC-OPT-018 — autorización — Integration
+
+`USUARIO` sobre `savePowerOptimization` → `FORBIDDEN` (no persiste). `ADMIN` de otro cliente sobre
+`calculatePowerOptimization` de un supply ajeno → `FORBIDDEN` (mismas reglas que §2.2 / TC-AUTH).
+
+#### TC-OPT-019 — powerOptimization(id) — Integration
+
+Recupera el registro persistido con sus `periods`. Id inexistente → `null` (sin error). `ADMIN` de
+otro cliente → `FORBIDDEN`.
+
+#### TC-OPT-020 — powerOptimizations(list) — Integration
+
+Lista del suministro; el resolver delega orden (`analysisTo desc`) y paginación (`take`/`skip`) a
+Prisma. Supply inexistente → `SUPPLY_NOT_FOUND`.
+
+#### TC-OPT-021 — deletePowerOptimization — Integration
+
+Borra y devuelve `true` (elimina antes los `periods`). Id inexistente → `false`. `USUARIO` →
+`FORBIDDEN` (no borra).
+
+### 4.7 Front (apps/web) — no normativo
+
+> El front **no estaba en el alcance original de M02** (el §4 es backend). Esta subsección documenta
+> la pantalla añadida para enseñar el módulo en el modo demo; las decisiones de UI son orientativas,
+> no contrato de implementación.
+
+- **Topbar compartida** (`app/shared/topbar.component.ts`): marca, navegación **Pre-factura /
+  Optimización** (resalta la ruta activa) y título de sección grande vía `@Input() section`. La
+  usan ambas pantallas; sustituye a la cabecera inline que tenía M01.
+- **Ruta** `/optimizacion` (protegida por `authGuard`) → `OptimizationComponent`
+  (`app/optimization/`). Reutiliza `GraphqlService` y llama a `calculatePowerOptimization` (no persiste).
+- **Layout veredicto-primero**: el titular responde a la decisión del usuario —
+  *"Conviene reducir/subir/reajustar la potencia"* (con ahorro anual neto) · *"Potencia bien
+  dimensionada"* · *"Potencia insuficiente (riesgo de penalización)"*. Debajo, la **acción** (potencia
+  a solicitar por período + restricción de 1 cambio/año) y un desglose neto compacto; la tabla por
+  período queda como evidencia.
+- **Alcance**: la pantalla decide sobre **potencia contratada** con la distribuidora actual. **No**
+  compara comercializadoras ni planes (sería un módulo aparte, fuera de M01–M06).
+- **Etiquetado de excesos**: el `excessSaving` puede ser negativo (bajar potencia acerca la óptima al
+  máximo demandado y puede generar excesos); en UI se etiqueta como *"Penaliz. por excesos"* cuando es
+  negativo y el titular usa siempre el **neto** (`annualSaving`).
+- **Curva demo**: `demo/demoOptimizationDataSource.ts` genera ≥12 meses de curva horaria determinista;
+  el `max_power` se fija coherente con la curva y un período (P6 en el 3.0TD sembrado) queda
+  infradimensionado a propósito para ejercitar los tres diagnósticos. Valores ilustrativos.
 
 ---
 

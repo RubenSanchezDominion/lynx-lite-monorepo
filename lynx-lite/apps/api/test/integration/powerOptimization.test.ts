@@ -28,6 +28,8 @@ import type {
 
 const server = buildServer();
 const DOMINION = { id: 'dom', role: 'DOMINION' as const };
+const USUARIO_S1 = { id: 'u1', role: 'USUARIO' as const, supplyId: 's1' };
+const ADMIN_OTHER = { id: 'a2', role: 'ADMIN' as const, clientId: 'client-B' };
 
 let seriesResult: PowerOptimizationSeries;
 const dataSource: PowerOptimizationDataSource = { load: vi.fn(async () => seriesResult) };
@@ -87,7 +89,25 @@ const CALC = `query($i: PowerOptimizationInput!) {
   }
 }`;
 const SAVE = `mutation($i: PowerOptimizationInput!) { savePowerOptimization(input: $i) { id annualSaving } }`;
+const GET = `query($id: ID!) { powerOptimization(id: $id) { id annualSaving periods { period diagnosis } } }`;
+const LIST = `query($s: String!, $l: Int, $o: Int) { powerOptimizations(supplyId: $s, limit: $l, offset: $o) { id analysisTo } }`;
+const DEL = `mutation($id: ID!) { deletePowerOptimization(id: $id) }`;
 const input = { cups: 'ES_CUPS', analysisFrom: '2024-01-01', analysisTo: '2024-12-31' };
+
+// Registro persistido completo (incluye supply para assertSupplyAccess y periods).
+function makePersisted(id: string, analysisTo = '2024-12-31') {
+  return {
+    id, supplyId: 's1', tariff: 'T_3_0TD',
+    analysisFrom: new Date('2024-01-01'), analysisTo: new Date(analysisTo),
+    granularity: 'hourly', upliftFactor: 1.05, sampleCount: 6,
+    fixedSaving: 100, excessSaving: 0, annualSaving: 100, recommendChange: true,
+    changeAllowed: true, changeBlockedUntil: null, createdAt: new Date(),
+    supply: { id: 's1', clientId: 'client-A' },
+    periods: [
+      { period: 1, currentPower: 50, optimalPower: 40, p99Power: 38, observedMax: 39, diagnosis: 'OVERSIZED', marginPct: -20 },
+    ],
+  };
+}
 
 describe('M02 — calculatePowerOptimization (camino feliz)', () => {
   it('devuelve óptimos por período con uplift 1.05', async () => {
@@ -172,5 +192,133 @@ describe('TC-OPT-014 — savePowerOptimization idempotente', () => {
     expect(id2).toBe('opt-1');
     expect(mockPrisma.powerOptimization.create).toHaveBeenCalledTimes(1);
     expect(mockPrisma.powerOptimization.update).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('TC-OPT-015 — CUPS inexistente → SUPPLY_NOT_FOUND', () => {
+  it('supply ausente', async () => {
+    mockPrisma.supply.findUnique.mockResolvedValue(null);
+    const r = await runOp(server, CALC, { variables: { i: input }, user: DOMINION });
+    expect(errorCode(r)).toBe('SUPPLY_NOT_FOUND');
+  });
+});
+
+describe('TC-OPT-016 — sin curva utilizable → NO_CONSUMPTION_DATA', () => {
+  it('hasUsableData=false', async () => {
+    setupHappyPath30TD();
+    seriesResult = { ...defaultSeries(), hasUsableData: false };
+    const r = await runOp(server, CALC, { variables: { i: input }, user: DOMINION });
+    expect(errorCode(r)).toBe('NO_CONSUMPTION_DATA');
+  });
+});
+
+describe('TC-OPT-017 — backfill no listo → BACKFILL_PENDING / FAILED', () => {
+  it('PENDING', async () => {
+    mockPrisma.supply.findUnique.mockResolvedValue({
+      id: 's1', cups: 'ES_CUPS', clientId: 'client-A', tariff: 'T_3_0TD', backfillStatus: 'PENDING',
+    });
+    const r = await runOp(server, CALC, { variables: { i: input }, user: DOMINION });
+    expect(errorCode(r)).toBe('BACKFILL_PENDING');
+  });
+  it('FAILED', async () => {
+    mockPrisma.supply.findUnique.mockResolvedValue({
+      id: 's1', cups: 'ES_CUPS', clientId: 'client-A', tariff: 'T_3_0TD', backfillStatus: 'FAILED',
+    });
+    const r = await runOp(server, CALC, { variables: { i: input }, user: DOMINION });
+    expect(errorCode(r)).toBe('BACKFILL_FAILED');
+  });
+});
+
+describe('TC-OPT-018 — autorización', () => {
+  it('USUARIO no puede persistir (savePowerOptimization → FORBIDDEN)', async () => {
+    setupHappyPath30TD(); // supply.clientId=client-A, id=s1; USUARIO_S1.supplyId=s1 pasa el acceso
+    const r = await runOp(server, SAVE, { variables: { i: input }, user: USUARIO_S1 });
+    expect(errorCode(r)).toBe('FORBIDDEN');
+    expect(mockPrisma.powerOptimization.create).not.toHaveBeenCalled();
+  });
+
+  it('ADMIN de otro cliente no accede al supply (calculate → FORBIDDEN)', async () => {
+    setupHappyPath30TD(); // supply.clientId=client-A; ADMIN_OTHER.clientId=client-B
+    const r = await runOp(server, CALC, { variables: { i: input }, user: ADMIN_OTHER });
+    expect(errorCode(r)).toBe('FORBIDDEN');
+  });
+});
+
+describe('TC-OPT-019 — powerOptimization(id)', () => {
+  it('recupera el registro con sus períodos', async () => {
+    mockPrisma.powerOptimization.findUnique.mockResolvedValue(makePersisted('opt-1'));
+    const r = await runOp(server, GET, { variables: { id: 'opt-1' }, user: DOMINION });
+    expect(r.errors).toBeUndefined();
+    const o = r.data?.powerOptimization as { id: string; periods: unknown[] };
+    expect(o.id).toBe('opt-1');
+    expect(o.periods).toHaveLength(1);
+  });
+
+  it('id inexistente → null (sin error)', async () => {
+    mockPrisma.powerOptimization.findUnique.mockResolvedValue(null);
+    const r = await runOp(server, GET, { variables: { id: 'nope' }, user: DOMINION });
+    expect(r.errors).toBeUndefined();
+    expect(r.data?.powerOptimization).toBeNull();
+  });
+
+  it('ADMIN de otro cliente → FORBIDDEN', async () => {
+    mockPrisma.powerOptimization.findUnique.mockResolvedValue(makePersisted('opt-1'));
+    const r = await runOp(server, GET, { variables: { id: 'opt-1' }, user: ADMIN_OTHER });
+    expect(errorCode(r)).toBe('FORBIDDEN');
+  });
+});
+
+describe('TC-OPT-020 — powerOptimizations(list)', () => {
+  it('lista ordenada por analysisTo desc con paginación', async () => {
+    mockPrisma.supply.findUnique.mockResolvedValue({ id: 's1', clientId: 'client-A' });
+    mockPrisma.powerOptimization.findMany.mockResolvedValue([
+      makePersisted('opt-2', '2024-12-31'),
+      makePersisted('opt-1', '2023-12-31'),
+    ]);
+    const r = await runOp(server, LIST, { variables: { s: 's1', l: 10, o: 0 }, user: DOMINION });
+    expect(r.errors).toBeUndefined();
+    const list = r.data?.powerOptimizations as { id: string }[];
+    expect(list.map(o => o.id)).toEqual(['opt-2', 'opt-1']);
+    // El resolver delega la ordenación y la paginación a Prisma.
+    expect(mockPrisma.powerOptimization.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { supplyId: 's1' },
+        orderBy: { analysisTo: 'desc' },
+        take: 10,
+        skip: 0,
+      }),
+    );
+  });
+
+  it('supply inexistente → SUPPLY_NOT_FOUND', async () => {
+    mockPrisma.supply.findUnique.mockResolvedValue(null);
+    const r = await runOp(server, LIST, { variables: { s: 'nope' }, user: DOMINION });
+    expect(errorCode(r)).toBe('SUPPLY_NOT_FOUND');
+  });
+});
+
+describe('TC-OPT-021 — deletePowerOptimization', () => {
+  it('borra y devuelve true', async () => {
+    mockPrisma.powerOptimization.findUnique.mockResolvedValue(makePersisted('opt-1'));
+    mockPrisma.powerOptimizationPeriod.deleteMany.mockResolvedValue({ count: 1 });
+    mockPrisma.powerOptimization.delete.mockResolvedValue({});
+    const r = await runOp(server, DEL, { variables: { id: 'opt-1' }, user: DOMINION });
+    expect(r.errors).toBeUndefined();
+    expect(r.data?.deletePowerOptimization).toBe(true);
+    expect(mockPrisma.powerOptimization.delete).toHaveBeenCalled();
+  });
+
+  it('id inexistente → false (no borra)', async () => {
+    mockPrisma.powerOptimization.findUnique.mockResolvedValue(null);
+    const r = await runOp(server, DEL, { variables: { id: 'nope' }, user: DOMINION });
+    expect(r.data?.deletePowerOptimization).toBe(false);
+    expect(mockPrisma.powerOptimization.delete).not.toHaveBeenCalled();
+  });
+
+  it('USUARIO → FORBIDDEN', async () => {
+    mockPrisma.powerOptimization.findUnique.mockResolvedValue(makePersisted('opt-1'));
+    const r = await runOp(server, DEL, { variables: { id: 'opt-1' }, user: USUARIO_S1 });
+    expect(errorCode(r)).toBe('FORBIDDEN');
+    expect(mockPrisma.powerOptimization.delete).not.toHaveBeenCalled();
   });
 });

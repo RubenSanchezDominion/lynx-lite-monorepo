@@ -24,10 +24,11 @@ const CHARGE_ENERGY: Record<string, Record<number, number>> = {
   T_2_0TD: { 1: 0.003000, 2: 0.002000, 3: 0.001000 },
   T_3_0TD: { 1: 0.005000, 2: 0.004000, 3: 0.003000, 4: 0.003000, 5: 0.002000, 6: 0.001000 },
 };
-// tepp4-5 €/kW·día (sintético, alineado con prisma/seed.ts).
+// tepp4-5 €/kW·día — valores oficiales Anexo II Resolución vigente 2026 (BOE-A-2025-26348),
+// alineados con prisma/seed.ts. 2.0TD solo tiene 2 períodos de potencia.
 const EXCESS_POWER: Record<string, Record<number, number>> = {
-  T_2_0TD: { 1: 0.060000, 2: 0.060000 },
-  T_3_0TD: { 1: 0.070000, 2: 0.060000, 3: 0.040000, 4: 0.040000, 5: 0.020000, 6: 0.020000 },
+  T_2_0TD: { 1: 0.279426, 2: 0.005316 },
+  T_3_0TD: { 1: 0.171373, 2: 0.090584, 3: 0.028721, 4: 0.021891, 5: 0.006142, 6: 0.006142 },
 };
 
 function flattenRates(map: Record<string, Record<number, number>>, rateType: string): Row[] {

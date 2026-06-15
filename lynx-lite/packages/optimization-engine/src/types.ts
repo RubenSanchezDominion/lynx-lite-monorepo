@@ -41,6 +41,12 @@ export interface OptimizationInput {
   oversizeMonths?: number; // default 6    — meses consecutivos requeridos
   undersizeRatio?: number; // default 0.02 — fracción de intervalos en exceso
   minSavingEur?: number; // default 0      — ahorro mínimo para recommendChange=true
+  // Coeficiente de granularidad (compensa el pico perdido al derivar potencia de energía horaria).
+  // Es un parámetro EMPÍRICO, no regulatorio: ajustable sin tocar código (calibración de negocio).
+  // Un valor bajo no genera recomendaciones falsas: el coste de excesos de la óptima se netea en
+  // annualSaving, de modo que el sistema se autoprotege. Defaults: hourly 1.05, quarter 1.00.
+  upliftHourly?: number; // default 1.05
+  upliftQuarter?: number; // default 1.00
 
   // Restricción de un cambio/año
   lastPowerChangeDate: string | null; // ISO "YYYY-MM-DD" (Contract.validFrom más reciente)

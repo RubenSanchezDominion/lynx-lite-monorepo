@@ -9,6 +9,15 @@ import type { PowerOptimizationDataSource } from './powerOptimizationData.js';
 // Histórico mínimo para que el percentil y la detección de rachas sean significativos (SPECS §4.1).
 const MIN_HISTORY_MONTHS = 12;
 
+// Coeficiente de granularidad (empírico, calibrable por ops vía env sin recompilar). Si la variable
+// no está o no es un número válido ≥ 1, el engine aplica su default (1.05 hourly / 1.00 quarter).
+function envUplift(name: string): number | undefined {
+  const raw = process.env[name];
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 1 ? n : undefined;
+}
+
 export interface ComputedPowerOptimization {
   supply: Supply;
   analysisFrom: Date;
@@ -102,6 +111,8 @@ export async function computePowerOptimization(
     tollRatesPower: rates.tollPower,
     chargeRatesPower: rates.chargePower,
     excessRatesPower: rates.excessPower,
+    upliftHourly: envUplift('OPT_UPLIFT_HOURLY'),
+    upliftQuarter: envUplift('OPT_UPLIFT_QUARTER'),
     lastPowerChangeDate: toISODate(contract.validFrom),
     analysisTo: toISODate(to),
   });

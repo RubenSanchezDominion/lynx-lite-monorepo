@@ -82,6 +82,20 @@ describe('TC-OPT-002 — 2.0TD con 2 períodos de potencia', () => {
   });
 });
 
+describe('TC-OPT-003b — uplift hourly configurable (override)', () => {
+  it('upliftHourly=1.10 sustituye al default 1.05', () => {
+    const r = optimizePower(
+      makeInput({
+        contractedPower: { P1: 40 },
+        powerSamplesByPeriod: { P1: exact(30) },
+        upliftHourly: 1.1,
+      }),
+    );
+    expect(r.upliftFactor).toBe(1.1);
+    expect(r.periods[0].optimalPower).toBeCloseTo(33, 6); // 30 × 1.10
+  });
+});
+
 describe('TC-OPT-003 — granularidad 15 min → sin uplift', () => {
   it('upliftFactor 1.00 y optimalRaw = p99', () => {
     const r = optimizePower(

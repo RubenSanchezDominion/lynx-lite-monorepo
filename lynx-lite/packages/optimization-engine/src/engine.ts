@@ -43,7 +43,8 @@ export function optimizePower(input: OptimizationInput): OptimizationResult {
   const oversizeMonths = input.oversizeMonths ?? 6;
   const undersizeRatio = input.undersizeRatio ?? 0.02;
   const minSavingEur = input.minSavingEur ?? 0;
-  const uplift = input.granularity === 'hourly' ? 1.05 : 1.0;
+  const uplift =
+    input.granularity === 'hourly' ? (input.upliftHourly ?? 1.05) : (input.upliftQuarter ?? 1.0);
 
   const periods = Object.keys(input.contractedPower).sort();
   const months = Object.keys(input.monthlyP99ByPeriod).sort();

@@ -24,11 +24,15 @@ const CHARGE_ENERGY = {
   T_3_0TD: { 1: 0.005000, 2: 0.004000, 3: 0.003000, 4: 0.003000, 5: 0.002000, 6: 0.001000 },
 };
 // Término de exceso de potencia tepp4-5 (€/kW·día), tipos 4 y 5 (art. 9.4.b.1).
-// ⚠️ Valores SINTÉTICOS de test/demo. Sustituir por los oficiales de la Resolución
-// de peajes vigente antes de producción.
+// Valores OFICIALES del Anexo II de la Resolución de peajes vigente desde 1-ene-2026
+// (BOE-A-2025-26348). 2.0TD solo tiene 2 períodos de potencia.
+// Histórico: desde 1-abr-2025 (BOE-A-2025-5341) eran 2.0TD P1 0,275041 P2 0,005297;
+// 3.0TD P1 0,168944 P2 0,089294 P3 0,028322 P4 0,021656 P5/P6 0,006126.
+// Nota: se siembran con validFrom 2020-01-01 (como el resto del seed) para cubrir los
+// períodos de los TC; en producción deben versionarse por su validFrom real (2025-04-01 / 2026-01-01).
 const EXCESS_POWER = {
-  T_2_0TD: { 1: 0.060000, 2: 0.060000 },
-  T_3_0TD: { 1: 0.070000, 2: 0.060000, 3: 0.040000, 4: 0.040000, 5: 0.020000, 6: 0.020000 },
+  T_2_0TD: { 1: 0.279426, 2: 0.005316 },
+  T_3_0TD: { 1: 0.171373, 2: 0.090584, 3: 0.028721, 4: 0.021891, 5: 0.006142, 6: 0.006142 },
 };
 
 async function seedRates() {
