@@ -65,7 +65,7 @@ export class ParticlesBackgroundComponent implements OnInit, AfterViewInit, OnDe
   private readonly maxRadiusCss = 700;
   private readonly pullFactor = 0.06; // 0..1, cuán rápido acuden al cursor
   private readonly returnFactor = 0.12; // 0..1, cuán rápido regresan al soltar
-  private readonly returnMs = 700; // duración del retorno antes de devolver el control al motor
+  private readonly returnMs = 200; // duración del retorno antes de devolver el control al motor
   private returnUntil = 0;
   private growTimer?: ReturnType<typeof setInterval>;
   private rafId?: number;
