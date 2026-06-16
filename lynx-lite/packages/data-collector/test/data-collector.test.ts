@@ -179,3 +179,71 @@ describe('fetchConsumption — camino feliz escribe en InfluxDB', () => {
     expect(writeApi.writePoint).toHaveBeenCalledTimes(2);
   });
 });
+
+// ─── M05 — factor de emisión compuesto desde el mix de generación (REData) ─────
+
+import {
+  parseGenerationMix,
+  composeCo2Factor,
+  genMixToCo2Point,
+  fetchGenerationMix,
+  EMISSION_COEFFICIENTS,
+  type RedataResponse,
+  type RedataHttp,
+} from '../src/index.js';
+
+describe('TC-CO2-001 — composición del factor desde el mix (Σ MW·coef / Σ MW)', () => {
+  it('Eólica 50 % + Ciclo combinado 30 % + Carbón 20 % → 301 gCO₂/kWh', () => {
+    const hour = {
+      datetime: '2026-01-01T10:00:00.000+01:00',
+      mwByTech: { Eólica: 5000, 'Ciclo combinado': 3000, Carbón: 2000 },
+    };
+    // (0·5000 + 370·3000 + 950·2000) / 10000 = (1_110_000 + 1_900_000)/10000 = 301
+    expect(composeCo2Factor(hour, EMISSION_COEFFICIENTS)).toBeCloseTo(301, 6);
+  });
+});
+
+describe('TC-CO2-002 — mix 100 % limpio → factor 0', () => {
+  it('renovables/nuclear con coef 0', () => {
+    const hour = {
+      datetime: '2026-01-01T10:00:00.000+01:00',
+      mwByTech: { Nuclear: 4000, Eólica: 6000, 'Solar fotovoltaica': 2000, Hidráulica: 1000 },
+    };
+    expect(composeCo2Factor(hour, EMISSION_COEFFICIENTS)).toBe(0);
+  });
+
+  it('genMixToCo2Point produce measurement co2_factor con tag system', () => {
+    const p = genMixToCo2Point(
+      { datetime: '2026-01-01T10:00:00.000+01:00', mwByTech: { Carbón: 1000 } },
+      EMISSION_COEFFICIENTS,
+    );
+    expect(p.measurement).toBe('co2_factor');
+    expect(p.tags.system).toBe('peninsula');
+    expect(p.fields.g_per_kwh).toBeCloseTo(950, 6);
+  });
+});
+
+describe('parseGenerationMix + fetchGenerationMix', () => {
+  const raw: RedataResponse = {
+    included: [
+      { attributes: { title: 'Eólica', values: [{ value: '5000', percentage: 50, datetime: '2026-01-01T10:00:00.000+01:00' }] } },
+      { attributes: { title: 'Carbón', values: [{ value: '5000', percentage: 50, datetime: '2026-01-01T10:00:00.000+01:00' }] } },
+    ],
+  };
+
+  it('pivota la respuesta JSONAPI a horas con MW por tecnología', () => {
+    const hours = parseGenerationMix(raw);
+    expect(hours).toHaveLength(1);
+    expect(hours[0].mwByTech).toEqual({ Eólica: 5000, Carbón: 5000 });
+  });
+
+  it('fetchGenerationMix compone y escribe co2_factor', async () => {
+    const writeApi = mockWriteApi();
+    const http: RedataHttp = { get: vi.fn().mockResolvedValue(raw) };
+    const points = await fetchGenerationMix(http, { startDate: '2026-01-01T00:00', endDate: '2026-01-01T23:00' }, EMISSION_COEFFICIENTS, writeApi);
+    expect(points).toHaveLength(1);
+    // (0·5000 + 950·5000)/10000 = 475
+    expect(points[0].fields.g_per_kwh).toBeCloseTo(475, 6);
+    expect(writeApi.writePoint).toHaveBeenCalledTimes(1);
+  });
+});

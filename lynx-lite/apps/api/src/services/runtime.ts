@@ -2,6 +2,8 @@ import type { PreInvoiceDataSource } from './preInvoiceData.js';
 import type { PowerOptimizationDataSource } from './powerOptimizationData.js';
 import type { AlertDataSource } from './alertData.js';
 import type { KpiDataSource } from './kpiData.js';
+import type { CarbonDataSource } from './carbonData.js';
+import type { Co2Ingestion } from './carbonIngestion.js';
 import type { EnsureData } from './ingestion.js';
 
 // Holder del DataSource de pre-factura. El bootstrap (src/index.ts) lo inicializa
@@ -64,6 +66,32 @@ export function getKpiDataSource(): KpiDataSource {
     throw new Error('KpiDataSource no inicializado. Llama a setKpiDataSource() en el arranque.');
   }
   return kpiDataSource;
+}
+
+// Holder del DataSource de huella de carbono (M05). Mismo patrón: el bootstrap lo inicializa con la
+// implementación InfluxDB; el demo con un generador determinista; los tests con un mock.
+let carbonDataSource: CarbonDataSource | null = null;
+
+export function setCarbonDataSource(ds: CarbonDataSource): void {
+  carbonDataSource = ds;
+}
+
+export function getCarbonDataSource(): CarbonDataSource {
+  if (!carbonDataSource) {
+    throw new Error('CarbonDataSource no inicializado. Llama a setCarbonDataSource() en el arranque.');
+  }
+  return carbonDataSource;
+}
+
+// Holder de la ingesta on-demand del factor de emisión (M05, opcional). En demo no se inyecta.
+let co2Ingestion: Co2Ingestion | undefined;
+
+export function setCo2Ingestion(fn: Co2Ingestion): void {
+  co2Ingestion = fn;
+}
+
+export function getCo2Ingestion(): Co2Ingestion | undefined {
+  return co2Ingestion;
 }
 
 // Holder de la ingesta on-demand (opcional). Si no se inicializa, el servicio de

@@ -1,5 +1,6 @@
 import { DatadisRateLimitError, type DatadisHttp } from './datadis.js';
 import type { EsiosHttp } from './esios.js';
+import type { RedataHttp } from './redata.js';
 
 function buildQuery(query: Record<string, string>): string {
   const params = new URLSearchParams(query);
@@ -64,6 +65,23 @@ export function createEsiosHttp(config: EsiosConfig): EsiosHttp {
       const url = `${config.baseUrl}${path}${buildQuery(query)}`;
       const res = await fetch(url, { headers: { 'x-api-key': config.apiKey } });
       if (!res.ok) throw new Error(`ESIOS ${path} → ${res.status}`);
+      return res.json();
+    },
+  };
+}
+
+// ─── Cliente REData (apidatos.ree.es, sin autenticación) ────────────────────────
+
+export interface RedataConfig {
+  baseUrl: string;
+}
+
+export function createRedataHttp(config: RedataConfig): RedataHttp {
+  return {
+    async get(path: string, query: Record<string, string>): Promise<unknown> {
+      const url = `${config.baseUrl}${path}${buildQuery(query)}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`REData ${path} → ${res.status}`);
       return res.json();
     },
   };

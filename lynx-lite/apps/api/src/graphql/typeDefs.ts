@@ -280,6 +280,37 @@ export const typeDefs = /* GraphQL */ `
     outlierPct: Float # default 0.20
   }
 
+  # ─── Huella de carbono (M05) ──────────────────────────────────────────────────
+  type CarbonReportLine {
+    monthKey: String!
+    monthStart: String! # ISO 8601 UTC
+    kwh: Float!
+    co2Kg: Float!
+    factorAvg: Float! # gCO₂/kWh
+    hasGaps: Boolean!
+  }
+
+  type CarbonReport {
+    id: ID!
+    supplyId: String!
+    rangeStart: String!
+    rangeEnd: String!
+    totalKwh: Float!
+    totalCo2Kg: Float!
+    ownFactorGPerKwh: Float!
+    nationalAvgFactor: Float!
+    deltaPct: Float!
+    hasGaps: Boolean!
+    computedAt: String!
+    lines: [CarbonReportLine!]! # ordenadas por monthStart (evolución)
+  }
+
+  input ComputeCarbonInput {
+    cups: String!
+    from: String! # ISO 8601 (inclusive)
+    to: String! # ISO 8601 (exclusive)
+  }
+
   # ─── Operaciones ────────────────────────────────────────────────────────────
   type Query {
     me: User!
@@ -302,6 +333,9 @@ export const typeDefs = /* GraphQL */ `
     productionUploads(supplyId: String!): [ProductionUpload!]!
     kpiReport(id: ID!): KpiReport
     kpiReports(supplyId: String!): [KpiReport!]!
+
+    carbonReport(id: ID!): CarbonReport
+    carbonReports(supplyId: String!): [CarbonReport!]!
   }
 
   type Mutation {
@@ -329,5 +363,7 @@ export const typeDefs = /* GraphQL */ `
 
     submitProductionData(input: SubmitProductionInput!): ProductionUpload!
     computeKpi(input: ComputeKpiInput!): KpiReport!
+
+    computeCarbonFootprint(input: ComputeCarbonInput!): CarbonReport!
   }
 `;

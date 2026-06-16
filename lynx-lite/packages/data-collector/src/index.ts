@@ -22,6 +22,20 @@ export {
 } from './esios.js';
 
 export {
+  parseGenerationMix,
+  composeCo2Factor,
+  genMixToCo2Point,
+  fetchGenerationMix,
+  type RedataValue,
+  type RedataSeries,
+  type RedataResponse,
+  type GenerationMixHour,
+  type RedataHttp,
+} from './redata.js';
+
+export { EMISSION_COEFFICIENTS } from './emissionCoefficients.js';
+
+export {
   getPeriod,
   periodForUtc,
   parseDatadisLocal,
@@ -34,8 +48,10 @@ export { writePoints, toInfluxPoint, type MeasurementPoint } from './points.js';
 export {
   createDatadisHttp,
   createEsiosHttp,
+  createRedataHttp,
   type DatadisConfig,
   type EsiosConfig,
+  type RedataConfig,
 } from './http.js';
 
 export {

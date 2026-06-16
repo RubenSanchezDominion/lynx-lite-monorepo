@@ -1,6 +1,6 @@
 # SPECS.md — lynx-lite
 
-**Version**: 0.3-DRAFT  
+**Version**: 0.4-DRAFT  
 **Fecha**: 2026-06-12  
 **Estado**: Pendiente de aprobación
 
@@ -14,7 +14,9 @@
 4. [M02 — Optimización de potencia contratada](#4-m02--optimización-de-potencia-contratada)
 5. [M03 — Alertas y detección de anomalías](#5-m03--alertas-y-detección-de-anomalías)
 6. [M04 — KPI de coste energético por unidad producida](#6-m04--kpi-de-coste-energético-por-unidad-producida)
-7. [Convenciones de test](#7-convenciones-de-test)
+7. [M05 — Huella de carbono](#7-m05--huella-de-carbono)
+8. [M06 — Simulación de autoconsumo solar](#8-m06--simulación-de-autoconsumo-solar)
+9. [Convenciones de test](#9-convenciones-de-test)
 
 ---
 
@@ -1703,7 +1705,7 @@ Estado al inicio de M02 (tras la Fase 0, commit de corrección de excesos de M01
   `prisma/migrations`). Los modelos nuevos de M02 (`PowerOptimization`, `PowerOptimizationPeriod`)
   y la relación inversa en `Supply` se añaden al `schema.prisma` y se aplican con `prisma migrate dev`
   cuando exista BD; en tests se usa el cliente mockeado.
-- **Patrón de tests**: Vitest; mock de Prisma con `vi.hoisted` (no `vitest-mock-extended`, ver §7.3).
+- **Patrón de tests**: Vitest; mock de Prisma con `vi.hoisted` (no `vitest-mock-extended`, ver §9.3).
 
 ### 4.1 Fuentes de datos
 
@@ -2098,7 +2100,7 @@ extend type Mutation {
 ### 4.6 Casos de test — contrato de implementación
 
 > Los tests del `optimization-engine` son unitarios (sin I/O). Los del resolver son de
-> integración con Prisma e InfluxDB mockeados. Nomenclatura `TC-OPT-NNN` (§7.1).
+> integración con Prisma e InfluxDB mockeados. Nomenclatura `TC-OPT-NNN` (§9.1).
 
 #### TC-OPT-001 — Percentil 99 + uplift + monotonía (3.0TD, hourly) — Unit
 
@@ -2318,7 +2320,7 @@ persiste, se acumula y el usuario gestiona (marca como vista o descarta). La det
 - **Data source de serie horaria** (≥ 13 semanas): `AlertDataSource` inyectable (espejo de
   `PreInvoiceDataSource`/`PowerOptimizationDataSource`), real = Flux contra InfluxDB, demo =
   generador determinista. Se inyecta vía `runtime.ts` (`setAlertDataSource`/`getAlertDataSource`).
-- **Patrón de tests**: Vitest; mock de Prisma con `vi.hoisted` (no `vitest-mock-extended`, ver §7.3).
+- **Patrón de tests**: Vitest; mock de Prisma con `vi.hoisted` (no `vitest-mock-extended`, ver §9.3).
 
 ### 5.1 Fuentes de datos
 
@@ -2647,7 +2649,7 @@ extend type Mutation {
 ### 5.6 Casos de test — contrato de implementación
 
 > Los tests del `alerts-engine` son unitarios (sin I/O). Los del resolver y el job son de integración
-> con Prisma e InfluxDB mockeados. Nomenclatura `TC-ALT-NNN` (§7.1).
+> con Prisma e InfluxDB mockeados. Nomenclatura `TC-ALT-NNN` (§9.1).
 
 #### TC-ALT-001 — ZSCORE dispara con z ≥ umbral (equilibrado) — Unit
 
@@ -2857,7 +2859,7 @@ ciclo de vida**: el cliente sube un fichero y dispara el cálculo bajo demanda.
   compuesto en `eurPerKwh`; demo = generador determinista. Se inyecta vía `runtime.ts`
   (`setKpiDataSource`/`getKpiDataSource`).
 - **Front**: nueva dependencia `xlsx` (SheetJS) **solo** en `apps/web` (parseo de `.xlsx` en cliente).
-- **Patrón de tests**: Vitest; mock de Prisma con `vi.hoisted` (no `vitest-mock-extended`, ver §7.3).
+- **Patrón de tests**: Vitest; mock de Prisma con `vi.hoisted` (no `vitest-mock-extended`, ver §9.3).
 - **Sin worker**: M04 no añade jobs a `apps/worker`.
 
 ### 6.1 Fuentes de datos
@@ -3194,7 +3196,7 @@ extend type Mutation {
 ### 6.6 Casos de test — contrato de implementación
 
 > Los tests del `kpi-engine` son unitarios (sin I/O). Los del resolver/servicio son de integración con
-> Prisma e InfluxDB mockeados. Nomenclatura `TC-KPI-NNN` (§7.1).
+> Prisma e InfluxDB mockeados. Nomenclatura `TC-KPI-NNN` (§9.1).
 
 #### TC-KPI-001 — Imputación de tramo alineado a horas — Unit
 
@@ -3333,11 +3335,853 @@ Mismo mecanismo de holders que M01–M03 (`runtime.ts`), arrancando con `npm run
 
 ---
 
-## 7. Convenciones de test
+## 7. M05 — Huella de carbono
+
+Cruza la **curva de consumo** ya ingestada (`hourly_consumption`) con el **factor de emisión horario**
+de la generación eléctrica peninsular para calcular las **emisiones de CO₂ asociadas al consumo**
+(kgCO₂eq), su evolución mensual/anual y la **comparación con la media nacional** del periodo. Es
+material directo de **reporting CSRD** (Corporate Sustainability Reporting Directive), obligatorio para
+empresas industriales medianas/grandes en la UE. Como M01/M02/M04, el cálculo puro vive en un módulo
+nuevo `packages/carbon-engine` (sin I/O); como M04, **no hay job ni estado de ciclo de vida**: el
+cliente dispara el cálculo bajo demanda.
+
+### 7.0 Decisiones de diseño (premisas de este módulo)
+
+> **El factor de emisión se *compone* del mix de generación — REData no publica un factor directo.** El
+> endpoint de REData `estructura-generacion` (apidatos.ree.es) devuelve el **mix horario de generación
+> por tecnología** (% y MW), no un factor de emisión gCO₂/kWh. Por tanto el factor horario se calcula
+> como `factor_h = Σ (porcentaje_tecnología_h × coef_CO₂_tecnología)`. Esto da **granularidad horaria
+> real** (el diferenciador: emisiones que dependen de *cuándo* consume el cliente, no de un promedio
+> anual plano).
+
+> **Coeficientes por tecnología = tabla constante documentada, no config por cliente.** Los coeficientes
+> de emisión por tecnología son constantes nacionales (operacionales de combustión, fuentes IPCC / REE /
+> MITECO), no varían por suministro ni por tarifa. Viven como **tabla constante** en
+> `packages/data-collector` (`emissionCoefficients.ts`), igual que el calendario tarifario de
+> `periods.ts` vive como código. **No** se añade un maestro Prisma (a diferencia de los peajes/cargos de
+> M01, que sí son regulatorios y cambian por tarifa). Valores de partida (gCO₂/kWh), a calibrar con la
+> publicación oficial vigente:
+>
+> | Tecnología (REData) | coef. gCO₂/kWh | | Tecnología (REData) | coef. gCO₂/kWh |
+> |---------------------|---------------:|-|---------------------|---------------:|
+> | Nuclear | 0 | | Solar fotovoltaica | 0 |
+> | Hidráulica | 0 | | Solar térmica | 0 |
+> | Eólica | 0 | | Turbinación bombeo | 0 |
+> | Ciclo combinado | 370 | | Cogeneración | 400 |
+> | Carbón | 950 | | Residuos | 700 |
+
+> **La comparación con "media nacional" es auto-contenida.** No se necesita una fuente extra (MITECO):
+> el **factor propio** del cliente es el factor **ponderado por su consumo**
+> (`Σ(kwh_h·factor_h)/Σ kwh_h`), y la **media nacional** es la **media temporal** del factor en el mismo
+> periodo (`mean(factor_h)`, el "kWh medio de la red"). El `deltaPct = (propio − nacional) / nacional`
+> indica si el cliente consume en horas más limpias (negativo, mejor) o más sucias (positivo, peor) que
+> la media. Mismo periodo, sin sesgo de comparar contra otro año.
+
+> **Sin estado ni job (como M04).** La huella es el resultado de un cálculo, no un objeto con ciclo de
+> vida. Se persiste un `CarbonReport` (+ líneas mensuales) para histórico/evolución, pero se dispara con
+> una mutation (`computeCarbonFootprint`), no con un cron. Recálculo idempotente por
+> `(supplyId, rangeStart, rangeEnd)`.
+
+1. **Granularidad y península (v1).** El factor se calcula a resolución **horaria** (se agrega el mix de
+   REData a hora si llega en tramos de 10 min). v1 cubre el sistema **peninsular** (`system=peninsula`);
+   Canarias/Baleares/Ceuta/Melilla quedan fuera de alcance (sus mix y factores difieren; se documenta).
+
+2. **Calidad de dato (gaps).** Una hora de consumo con `gap=true` (imputado/estimado por M01) propaga
+   `hasGaps`; el bucket mensual y el `CarbonReport` agregan la señal. La UI muestra un **banner amarillo
+   no bloqueante** (como M01/M03/M04); el cálculo **no se bloquea**.
+
+### 7.0bis Prerrequisitos de implementación
+
+- **Nuevo paquete `packages/carbon-engine`**: función pura `computeCarbonFootprint(input)` + utilidades
+  (`weightedMean`, `mean`). Mismo patrón que `kpi-engine`/`alerts-engine`: sin Prisma, sin InfluxDB,
+  100 % testeable con datos sintéticos. **No conoce husos ni la fuente del factor**: recibe el factor
+  horario ya compuesto (gCO₂/kWh) y cada hora con su **mes local Madrid ya resuelto** (`month`); la
+  conversión de zona la hace el servicio.
+- **Nuevo adaptador `packages/data-collector/src/redata.ts`**: `fetchGenerationMix(http, {from, to})`
+  (llama a `estructura-generacion`) + `genMixToCo2Point(mixHour, coeffs)` (transforma el mix horario en
+  un punto `co2_factor` componiendo `Σ %·coef`). Cliente HTTP REData en `http.ts` (sin auth, como ESIOS
+  pero sin api-key). Tabla `emissionCoefficients.ts`. Exportado en `index.ts`.
+- **Ingesta on-demand de `co2_factor`** (espejo del PVPC de M01, §1.4): el servicio comprueba si
+  InfluxDB ya cubre el rango; si falta, pide el mix a REData, compone el factor y lo escribe en
+  `co2_factor`. **Worker cron opcional/futuro** (un `daily-co2-factor` análogo al PVPC), **no en v1**.
+- **Nuevos modelos Prisma** `CarbonReport`, `CarbonReportLine` + relaciones inversas en `Supply`. Como en
+  M01–M04, **no hay migración aplicada** (el repo nunca ha corrido contra Postgres real); se añaden a
+  `schema.prisma`. En tests, cliente mockeado.
+- **Data source** `CarbonDataSource` inyectable (espejo de los de M01–M04): real = Flux contra InfluxDB
+  (`hourly_consumption` + `co2_factor`) con la ingesta on-demand del factor; demo = generador
+  determinista. Se inyecta vía `runtime.ts` (`setCarbonDataSource`/`getCarbonDataSource`).
+- **Variable de entorno** `REDATA_URL` (default `http://localhost:3002`, ya en la tabla de adaptadores
+  §1.2). Sin nueva dependencia de front.
+- **Patrón de tests**: Vitest; mock de Prisma con `vi.hoisted` (no `vitest-mock-extended`, ver §9.3).
+- **Sin worker**: M05 no añade jobs a `apps/worker` en v1.
+
+### 7.1 Fuentes de datos
+
+| Fuente | Endpoint / origen | Dato obtenido | Uso en M05 |
+|--------|-------------------|---------------|------------|
+| **REData** | `GET /es/datos/generacion/estructura-generacion` (`start_date`, `end_date`, `time_trunc=hour`) | Mix horario de generación por tecnología (`included[].attributes.values[]`: `percentage`, `value` MW, `datetime`) | Componer el factor de emisión horario |
+| InfluxDB | measurement `hourly_consumption` (`kwh`, tag `gap`) | Curva horaria del rango solicitado | Energía consumida por hora |
+| InfluxDB | measurement `co2_factor` (tag `system`, field `g_per_kwh`) | Factor de emisión horario ya compuesto | Factor por hora (escrito por la ingesta on-demand) |
+
+> **Única ingesta nueva**: `co2_factor`. La curva de consumo ya la carga M01 (backfill + job diario,
+> §1.5). El factor se compone en la ingesta (mix → `Σ %·coef`) y se cachea en InfluxDB para no repetir
+> llamadas a REData. No se llama a REData durante el cálculo si el rango ya está cubierto.
+>
+> **Rango**: el cálculo cubre `[from, to)` (parámetros de la mutation). Si falta curva de consumo en
+> parte del rango (huecos `gap`), esas horas se marcan pero el cálculo no se bloquea.
+
+### 7.2 Modelos Prisma
+
+```prisma
+// ─── Huella de carbono (M05) ─────────────────────────────────────────────────
+
+model CarbonReport {
+  id                String             @id @default(uuid())
+  supplyId          String
+  supply            Supply             @relation(fields: [supplyId], references: [id])
+  rangeStart        DateTime           // inicio del periodo (UTC)
+  rangeEnd          DateTime           // fin del periodo (UTC)
+  totalKwh          Float
+  totalCo2Kg        Float              // emisiones totales kgCO₂eq
+  ownFactorGPerKwh  Float              // factor ponderado por consumo (gCO₂/kWh)
+  nationalAvgFactor Float              // media temporal del factor en el periodo (gCO₂/kWh)
+  deltaPct          Float              // (ownFactor − national) / national
+  hasGaps           Boolean            @default(false)
+  computedAt        DateTime           @default(now())
+  lines             CarbonReportLine[]
+  @@unique([supplyId, rangeStart, rangeEnd])  // idempotencia del recálculo
+}
+
+model CarbonReportLine {
+  id          String       @id @default(uuid())
+  reportId    String
+  report      CarbonReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  monthKey    String       // "YYYY-MM" (calendario local Madrid)
+  monthStart  DateTime     // inicio del mes (para ordenar la evolución)
+  kwh         Float
+  co2Kg       Float
+  factorAvg   Float        // factor medio del mes (gCO₂/kWh)
+  hasGaps     Boolean      @default(false)
+}
+```
+
+> **Cambios en `Supply`**: añadir la relación inversa `carbonReports CarbonReport[]`. No se modifica
+> ningún otro modelo de M01–M04.
+
+> **Portabilidad**: como en M03/M04, las claves de mes se guardan como texto. El recálculo del mismo
+> `(supplyId, rangeStart, rangeEnd)` sustituye el `CarbonReport` previo (idempotente).
+
+### 7.3 Esquema InfluxDB
+
+M05 define **un measurement nuevo**, `co2_factor`:
+
+| Measurement | Tags | Fields | Escritura |
+|-------------|------|--------|-----------|
+| `co2_factor` | `system` (`peninsula` en v1) | `g_per_kwh` (factor horario compuesto) | Ingesta on-demand desde REData (mix → `Σ %·coef`) |
+
+Reutiliza `hourly_consumption` (`kwh`, tag `gap`, §3.3). La composición mix → factor ocurre en la
+**ingesta** (no en el engine, que lee el factor ya compuesto). La asignación de la hora local Madrid
+para los buckets mensuales usa el mismo calendario que la ingesta (§3.3).
+
+### 7.4 Algoritmo de cálculo — paso a paso
+
+El cálculo puro vive en `packages/carbon-engine` (`computeCarbonFootprint`): sin I/O. El servicio carga
+la curva y el factor (vía `CarbonDataSource`, garantizando la ingesta on-demand del factor) y persiste
+el `CarbonReport`.
+
+#### Responsabilidad del servicio / data source (construcción de inputs)
+
+| Campo del input | Cómo lo construye el servicio / data source |
+|-----------------|---------------------------------------------|
+| `consumption[]` | buckets `(ts, month, kwh, gap)` de `hourly_consumption` sobre `[from, to)`, con `month` = "YYYY-MM" local Madrid ya resuelto |
+| `factors[]` | buckets `(ts, gPerKwh)` de `co2_factor` sobre `[from, to)` (ingestados on-demand si faltan), alineados por `ts` con `consumption` |
+
+> Validaciones **antes** de invocar al engine: `SUPPLY_NOT_FOUND`, `BACKFILL_*` (histórico no listo,
+> §3.5), `NO_CONSUMPTION_DATA` (sin curva en el rango), `CO2_NO_FACTOR_DATA` (REData no devuelve mix para
+> el rango y no hay factor cacheado).
+
+#### Interfaz del carbon-engine
+
+```typescript
+// ─── Input ──────────────────────────────────────────────────────────────────
+
+interface ConsumptionHour {
+  ts: string;     // ISO UTC, inicio de la hora
+  month: string;  // "YYYY-MM" local Madrid (resuelto por el servicio)
+  kwh: number;
+  gap: boolean;   // imputado/estimado → marca de calidad
+}
+
+interface Co2FactorHour {
+  ts: string;       // ISO UTC, alineado con consumption
+  gPerKwh: number;  // factor compuesto (Σ %·coef), gCO₂/kWh
+}
+
+interface CarbonInput {
+  consumption: ConsumptionHour[];  // ordenado por ts
+  factors:     Co2FactorHour[];    // mismo eje temporal que consumption
+}
+
+// ─── Output ─────────────────────────────────────────────────────────────────
+
+interface CarbonMonthBucket {
+  key: string; monthStart: string;   // "YYYY-MM"
+  kwh: number; co2Kg: number; factorAvg: number;
+  hasGaps: boolean;
+}
+
+interface CarbonResult {
+  months: CarbonMonthBucket[];           // ordenados por monthStart (evolución)
+  totalKwh: number; totalCo2Kg: number;
+  ownFactorGPerKwh: number;              // ponderado por consumo
+  nationalAvgFactorGPerKwh: number;      // media temporal del periodo
+  deltaPct: number;                      // (own − national) / national
+  hasGaps: boolean;
+}
+
+function computeCarbonFootprint(input: CarbonInput): CarbonResult;
+```
+
+#### Paso 1 — Emisiones por hora
+
+Alineando `factors[]` con `consumption[]` por `ts`:
+
+```
+para cada hora h:
+  co2Kg_h = h.kwh * factor_h / 1000        // gCO₂ → kgCO₂
+  si h.gap: hasGap del mes = true
+```
+
+Sin redondeo intermedio.
+
+#### Paso 2 — Agregación mensual (calendario local Madrid)
+
+Cada hora se asigna a su bucket `month` ("YYYY-MM", ya local). Por bucket:
+`kwh = Σ`, `co2Kg = Σ`, `factorAvg = Σ(kwh·factor)/Σ kwh` (factor medio ponderado del mes).
+
+#### Paso 3 — Factor propio, media nacional y delta
+
+```
+ownFactorGPerKwh     = Σ(kwh_h · factor_h) / Σ kwh_h     // ponderado por consumo
+nationalAvgFactor    = mean(factor_h)                     // media temporal del periodo
+deltaPct             = (ownFactorGPerKwh − nationalAvgFactor) / nationalAvgFactor
+```
+
+`deltaPct < 0` → el cliente consume en horas más limpias que la media (mejor); `> 0`, peor.
+
+#### Paso 4 — Totales y evolución temporal
+
+```
+totalKwh   = Σ kwh;   totalCo2Kg = Σ co2Kg
+months ordenados por monthStart → serie de evolución de kgCO₂
+```
+
+#### Notas de precisión y redondeo
+
+- Mismo criterio que §3.4 / §4.4 / §5.4 / §6.4: **sin redondeo intermedio**; el engine nunca redondea.
+  Emisiones, factores ponderados y media en doble precisión; el redondeo es de presentación.
+- Tests de kgCO₂ y factores con tolerancia `±0.001`.
+
+### 7.5 Esquema GraphQL
+
+```graphql
+type CarbonReportLine {
+  monthKey:   String!
+  monthStart: String!   # ISO 8601 UTC
+  kwh:        Float!
+  co2Kg:      Float!
+  factorAvg:  Float!    # gCO₂/kWh
+  hasGaps:    Boolean!
+}
+
+type CarbonReport {
+  id:                ID!
+  supplyId:          String!
+  rangeStart:        String!
+  rangeEnd:          String!
+  totalKwh:          Float!
+  totalCo2Kg:        Float!
+  ownFactorGPerKwh:  Float!
+  nationalAvgFactor: Float!
+  deltaPct:          Float!
+  hasGaps:           Boolean!
+  computedAt:        String!
+  lines:             [CarbonReportLine!]!   # ordenadas por monthStart (evolución)
+}
+
+input ComputeCarbonInput {
+  cups: String!
+  from: String!   # ISO 8601 (inclusive)
+  to:   String!   # ISO 8601 (exclusive)
+}
+
+extend type Query {
+  carbonReport(id: ID!): CarbonReport
+  carbonReports(supplyId: String!): [CarbonReport!]!
+}
+
+extend type Mutation {
+  # Calcula (o recalcula, idempotente por supplyId+rango) y persiste la huella. Ingesta el factor
+  # de REData on-demand si falta en InfluxDB.
+  computeCarbonFootprint(input: ComputeCarbonInput!): CarbonReport!
+}
+```
+
+**Errores esperados** (formato GraphQL estándar con `extensions.code`):
+
+| Código | Condición |
+|--------|-----------|
+| `SUPPLY_NOT_FOUND` | El CUPS no existe en PostgreSQL |
+| `BACKFILL_PENDING` / `BACKFILL_RUNNING` / `BACKFILL_FAILED` | El histórico aún no está disponible (§3.5) |
+| `NO_CONSUMPTION_DATA` | No hay curva (`hourly_consumption`) en el rango |
+| `CO2_NO_FACTOR_DATA` | REData no devuelve mix para el rango y no hay factor cacheado en `co2_factor` |
+| `CARBON_REPORT_NOT_FOUND` | `carbonReport(id)` — *devuelve `null`, no error* (consistente con `alert(id)`) |
+
+> **Autorización** (§2.2): leer (`carbonReport`, `carbonReports`) → `assertSupplyAccess` (DOMINION
+> todo; ADMIN su cliente; GESTOR/USUARIO su suministro). Escribir (`computeCarbonFootprint`) → rol de
+> escritura (DOMINION/ADMIN/GESTOR); `USUARIO` es **solo lectura** (mismo criterio que el resto de
+> módulos).
+
+### 7.6 Casos de test — contrato de implementación
+
+> Los tests del `carbon-engine` y de la composición del factor (`genMixToCo2Point`) son unitarios (sin
+> I/O). Los del resolver/servicio son de integración con Prisma, InfluxDB y REData mockeados.
+> Nomenclatura `TC-CO2-NNN` (§9.1).
+
+#### TC-CO2-001 — Composición del factor desde el mix — Unit
+
+`genMixToCo2Point` con mix `{Eólica 50 %, Ciclo combinado 30 %, Carbón 20 %}` y la tabla de
+coeficientes → `factor = 0·0.5 + 370·0.3 + 950·0.2 = 301 gCO₂/kWh`. Verifica `Σ %·coef`.
+
+#### TC-CO2-002 — Tecnologías limpias → coef 0 — Unit
+
+Mix 100 % renovable/nuclear → `factor = 0`. Confirma que las tecnologías de la tabla con coef 0 no
+emiten.
+
+#### TC-CO2-003 — Emisiones por hora (g→kg) — Unit
+
+`kwh=100`, `factor=300 gCO₂/kWh` → `co2Kg = 30`. Verifica la conversión `/1000`.
+
+#### TC-CO2-004 — Agregación mensual suma kWh y CO₂ — Unit
+
+Horas de un mismo mes → bucket con `kwh=Σ`, `co2Kg=Σ`, `factorAvg` ponderado por consumo.
+
+#### TC-CO2-005 — factorAvg mensual ponderado por consumo — Unit
+
+Dos horas `(kwh=10, factor=200)` y `(kwh=90, factor=400)` → `factorAvg = (10·200+90·400)/100 = 380`
+(no media simple 300). Verifica ponderación.
+
+#### TC-CO2-006 — Factor propio vs media nacional — Unit
+
+Cliente que consume en horas limpias → `ownFactorGPerKwh < nationalAvgFactor` → `deltaPct < 0`. El caso
+inverso (consumo en horas sucias) → `deltaPct > 0`.
+
+#### TC-CO2-007 — deltaPct exacto — Unit
+
+`ownFactor=240`, `national=300` → `deltaPct = (240−300)/300 = −0.20`.
+
+#### TC-CO2-008 — Frontera de mes/año — Unit
+
+Horas en diciembre y enero → claves `"YYYY-12"` / `"(YYYY+1)-01"` correctas; `months` ordenados por
+`monthStart`.
+
+#### TC-CO2-009 — Gap propaga hasGaps — Unit
+
+Hora con `gap=true` → `hasGaps=true` en el mes y en el resultado. El cálculo **no** se aborta.
+
+#### TC-CO2-010 — Totales — Unit
+
+`totalKwh`/`totalCo2Kg` correctos sobre todo el periodo.
+
+#### TC-CO2-011 — computeCarbonFootprint calcula y persiste — Integration
+
+Curva + factor disponibles → `CarbonReport` con `lines` mensuales. Sin curva → `NO_CONSUMPTION_DATA`.
+
+#### TC-CO2-012 — Ingesta on-demand del factor — Integration
+
+`co2_factor` ausente en el rango → el servicio llama a REData (`estructura-generacion`), compone y
+escribe el factor, y procede. REData sin datos para el rango → `CO2_NO_FACTOR_DATA`.
+
+#### TC-CO2-013 — Idempotencia por (supplyId, rango) — Integration
+
+Dos llamadas con el mismo `(cups, from, to)` actualizan el **mismo** `CarbonReport` (por `@@unique`),
+no duplican.
+
+#### TC-CO2-014 — Backfill no listo → BACKFILL_* — Integration
+
+`backfillStatus = PENDING/RUNNING/FAILED` → `BACKFILL_PENDING`/`BACKFILL_RUNNING`/`BACKFILL_FAILED`
+(mismo contrato que §3.7 / §4.6 / §5.6 / §6.6).
+
+#### TC-CO2-015 — Consultas y autorización — Integration
+
+`carbonReports` filtra por supply; `carbonReport(id)` inexistente → `null`. `USUARIO` sobre
+`computeCarbonFootprint` → `FORBIDDEN`; `ADMIN` de otro cliente sobre datos ajenos → `FORBIDDEN`
+(reglas §2.2).
+
+### 7.7 Front (apps/web) — no normativo en lo visual
+
+> Como en M02–M04 (§4.7/§5.7/§6.7), el detalle visual no es contrato; el **flujo de datos** (mutation/
+> queries que invoca) **sí** lo es.
+
+- **Topbar**: nueva entrada **Huella** junto a Pre-factura / Optimización / Alertas / KPI
+  (`shared/topbar.component.ts`).
+- **Ruta** `/huella` (protegida por `authGuard`) → `CarbonComponent`. Reutiliza `GraphqlService`.
+- **Entradas**: selector de CUPS + rango de fechas (`from`/`to`).
+- **Flujo**: botón **Calcular huella** → `computeCarbonFootprint(input)`.
+- **Resultado**: total **kgCO₂eq**, serie/gráfico de **evolución mensual**, y la **comparativa** del
+  factor propio vs media nacional (`deltaPct`, verde si negativo / rojo si positivo). **Banner amarillo**
+  no bloqueante si `hasGaps`. Mensaje de contexto **CSRD**.
+
+### 7.8 Modo demo (para probar `/huella` sin DBs reales)
+
+Mismo mecanismo de holders que M01–M04 (`runtime.ts`), arrancando con `npm run demo`:
+
+- **`makeDemoCarbonDataSource()`**: genera una curva horaria determinista (`hourly_consumption`) y un
+  **factor horario determinista** (`co2_factor`) con forma realista (más limpio de día por la solar, más
+  sucio en puntas), sin `Math.random()`. En `index.ts` se inyecta la fuente real (Flux + ingesta REData
+  on-demand); en `demo.ts`, `makeDemoCarbonDataSource()`.
+- **`CarbonReport` demo sembrado** en el store en memoria (`demo/store.ts`): varios meses con `deltaPct`
+  claramente distinto de 0 (un perfil de consumo desplazado a horas limpias o sucias) para enseñar la
+  comparativa. Así `/huella` muestra datos al entrar sin necesidad de calcular.
+- **Delegados Prisma** en `store.ts` para `carbonReport`, `carbonReportLine`, sembrados en ambos CUPS
+  demo.
+- **Resultado esperado documentado**: en demo, `computeCarbonFootprint(cups, from, to)` produce un
+  `CarbonReport` con `lines` mensuales, `deltaPct` coherente con el perfil sembrado, y es idempotente
+  (re-cálculo no duplica).
+
+### 7.9 Estado de implementación (2026-06-16)
+
+**HECHO y VERIFICADO** (slice completo, como M04; `npm run build` + `npm test` + `npm run build:web` verdes):
+
+- ✅ `packages/carbon-engine` — `computeCarbonFootprint` puro + 10 unit `TC-CO2-003..010`.
+- ✅ `packages/data-collector` — `redata.ts` (`parseGenerationMix`, `composeCo2Factor`, `genMixToCo2Point`,
+  `fetchGenerationMix`) + `emissionCoefficients.ts` + `createRedataHttp`; tests `TC-CO2-001/002` (+ parse/fetch).
+- ✅ `apps/api` — `carbonData.ts`, `carbonIngestion.ts` (ingesta on-demand `co2_factor`), `carbonService.ts`
+  (idempotente por `supplyId+rango`), `resolvers/carbon.ts`, typeDefs, holders en `runtime.ts`, error
+  `CO2_NO_FACTOR_DATA`; 9 integración `TC-CO2-011..015`.
+- ✅ Prisma — modelos `CarbonReport`/`CarbonReportLine` + relación inversa en `Supply` (en `schema.prisma`).
+- ✅ Demo — `demoCarbonDataSource.ts` + delegados y seed `carbon-demo-30td` en `store.ts`; bootstrap real
+  (Flux + REData on-demand, `REDATA_URL`) y demo.
+- ✅ Front — ruta `/huella` (`carbon.component.ts`) + entrada "Huella" en topbar.
+
+**PENDIENTE** (deuda consciente, no olvido):
+
+1. ⚠️ **Calibrar los coeficientes de emisión** (`emissionCoefficients.ts`) con la fuente oficial vigente
+   (MITECO/REE). Hoy son **valores de partida marcados `TODO`**: las cifras de CO₂ **no** son defendibles
+   para reporting CSRD hasta calibrarlas.
+2. **Migración Prisma + validación contra Postgres/InfluxDB reales** — transversal M01–M05 (el repo nunca ha
+   corrido contra DBs reales). Modelos añadidos a `schema.prisma`, `prisma migrate` sin ejecutar.
+3. **Sin worker cron de `co2_factor`** — ingesta on-demand en v1; el job periódico (análogo al PVPC) queda
+   como mejora futura.
+4. **Sin test de front automatizado** para `/huella` (no hay infra karma/jasmine cableada; verificación manual).
+
+---
+
+## 8. M06 — Simulación de autoconsumo solar
+
+Estima qué pasaría si el cliente instalara una planta fotovoltaica: cruza la **producción solar** de
+PVGIS con la **curva real de consumo** del cliente (`hourly_consumption`) para calcular, hora a hora,
+**autoconsumo** y **excedentes**, y de ahí los ratios de autoconsumo/cobertura, el **ahorro anual** y el
+**payback**. Es el **diferenciador**: usa la curva **real** del cliente, no perfiles sintéticos de
+consumo como los simuladores ligeros del mercado. Como M01/M02/M04/M05, el cálculo puro vive en un
+módulo nuevo `packages/solar-engine` (sin I/O); como M04/M05, **no hay job ni estado**: simulación bajo
+demanda.
+
+### 8.0 Decisiones de diseño (premisas de este módulo)
+
+> **PVGIS da agregados mensuales — la producción horaria se *reparte*.** El mock (y el endpoint real)
+> `/api/v5_2/PVcalc` devuelve producción **mensual/anual** (`outputs.monthly.fixed[].E_m`,
+> `outputs.totals.fixed.E_y`), **no** serie horaria. Para el cruce hora a hora, el `E_m` de cada mes se
+> reparte entre las horas con un **perfil solar intradía determinista** (campana entre orto y ocaso,
+> longitud de día según el mes). El cruce `min(prod_h, consumo_h)` usa la curva de consumo **real** —
+> ahí está el diferenciador, no en la forma de la producción. *(Mejora futura: el endpoint PVGIS
+> `seriescalc` da serie horaria real de un año meteorológico tipo; requeriría ampliar el mock y mapear
+> el año tipo a las fechas del cliente. Fuera de v1.)*
+
+> **Modelo económico — coste evitado + excedentes; payback simple.** El ahorro tiene dos componentes:
+> `autoconsumo_h × eurPerKwh_h` (coste de energía **evitado**, idéntico al término de energía de M01,
+> §3.4) + `excedente_h × precioCompensación` (compensación simplificada de excedentes, el mismo
+> mecanismo que M01 ya contempla). El `payback = CAPEX / ahorro_anual`, con `CAPEX = kWp × €/kWp`
+> (`costPerKwp` es input, **default 1000 €/kWp**). Si `ahorro_anual ≤ 0`, `paybackYears = null`. La
+> composición del precio se hace en el servicio (reutilizando M01) y se pasa al engine ya compuesta.
+
+> **PVGIS se cachea por parámetros (no repetir llamadas).** Una `SolarSimulation` se identifica por
+> `(supplyId, lat, lon, kwp, lossPct, tilt, azimuth)`. Recalcular con los mismos parámetros devuelve la
+> simulación cacheada (idempotente); cambiar cualquier parámetro genera otra. Evita llamar a PVGIS de
+> más.
+
+1. **Cruce horario.** Para cada hora: `autoconsumo_h = min(produccion_h, consumo_h)`,
+   `excedente_h = max(0, produccion_h − consumo_h)`. La energía de red evitada es el autoconsumo; el
+   excedente se vierte (compensado).
+
+2. **Periodo de análisis.** Por defecto, los **últimos 12 meses** de curva disponible. La producción de
+   PVGIS es un **año meteorológico medio** (no de fechas concretas): se reparte por **mes del año** sobre
+   ese periodo. El resultado es, por construcción, una **estimación anual** representativa.
+
+3. **Calidad de dato (gaps).** Horas de consumo con `gap=true` se usan igualmente (es una simulación,
+   no facturación); se documenta como limitación. No bloquea.
+
+### 8.0bis Prerrequisitos de implementación
+
+- **Nuevo paquete `packages/solar-engine`**: función pura `simulateSolar(input)` + utilidades. Mismo
+  patrón que `carbon-engine`/`kpi-engine`: sin Prisma, sin InfluxDB, 100 % testeable. **No conoce husos,
+  tarifas ni el perfil intradía**: recibe las series horarias (consumo, producción ya repartida, precio
+  ya compuesto) y los parámetros económicos; el reparto `E_m`→horas, la hora local y la composición del
+  precio los hace el servicio.
+- **Nuevo adaptador `packages/data-collector/src/pvgis.ts`**: `fetchPvProduction(http, params)` (llama a
+  `/api/v5_2/PVcalc` con `lat`, `lon`, `peakpower`, `loss`, `angle`=tilt, `aspect`=azimuth) → devuelve
+  `{ monthly: number[12] (E_m), annual: number (E_y) }`. Cliente HTTP PVGIS en `http.ts` (sin auth).
+  Exportado en `index.ts`.
+- **Nuevo modelo Prisma** `SolarSimulation` + relación inversa en `Supply`. Como en M01–M05, **no hay
+  migración aplicada**; se añade a `schema.prisma`. En tests, cliente mockeado.
+- **Data source** `SolarDataSource` inyectable: real = PVGIS (producción mensual) + Flux InfluxDB
+  (`hourly_consumption` + `pvpc_price`) + maestros de energía PostgreSQL (composición de M01); demo =
+  generador determinista. Se inyecta vía `runtime.ts` (`setSolarDataSource`/`getSolarDataSource`).
+- **Variable de entorno** `PVGIS_URL` (default `http://localhost:3004`, ya en §1.2). Sin nueva
+  dependencia de front.
+- **Patrón de tests**: Vitest; mock de Prisma con `vi.hoisted` (no `vitest-mock-extended`, ver §9.3).
+- **Sin worker**: M06 es on-demand por simulación (PVGIS no es serie temporal periódica).
+
+### 8.1 Fuentes de datos
+
+| Fuente | Endpoint / origen | Dato obtenido | Uso en M06 |
+|--------|-------------------|---------------|------------|
+| **PVGIS** | `GET /api/v5_2/PVcalc` (`lat`, `lon`, `peakpower`, `loss`, `angle`, `aspect`) | Producción **mensual** (`outputs.monthly.fixed[].E_m`) y **anual** (`outputs.totals.fixed.E_y`) | Producción solar (repartida a horas en el servicio) |
+| InfluxDB | measurement `hourly_consumption` (`kwh`) | Curva horaria real del cliente | Consumo por hora (cruce `min`) |
+| InfluxDB | measurement `pvpc_price` | Precio horario PVPC | Componente del `eurPerKwh` (coste evitado) |
+| PostgreSQL | `TollRate` / `ChargeRate` (tipo `ENERGY`, vigentes) | Peaje y cargo de energía | Componentes del `eurPerKwh` (idéntico a M01/M04) |
+
+> **Sin ingesta nueva en InfluxDB**: M06 lee `hourly_consumption` y `pvpc_price` (ya de M01) y obtiene la
+> producción de PVGIS bajo demanda, cacheándola en `SolarSimulation` (Prisma), no en InfluxDB.
+>
+> **Rango**: últimos 12 meses de curva disponible (default). Si no hay curva → `NO_CONSUMPTION_DATA`.
+
+### 8.2 Modelos Prisma
+
+```prisma
+// ─── Simulación de autoconsumo solar (M06) ───────────────────────────────────
+
+model SolarSimulation {
+  id                     String   @id @default(uuid())
+  supplyId               String
+  supply                 Supply   @relation(fields: [supplyId], references: [id])
+  // Parámetros de entrada (clave de caché)
+  lat                    Float
+  lon                    Float
+  kwp                    Float    // potencia pico instalada
+  lossPct                Float    @default(14)
+  tilt                   Float    @default(35)   // inclinación (PVGIS `angle`)
+  azimuth                Float    @default(0)    // orientación (PVGIS `aspect`)
+  costPerKwp             Float    @default(1000) // €/kWp para el CAPEX
+  // Periodo de consumo analizado
+  rangeStart             DateTime
+  rangeEnd               DateTime
+  // Resultados
+  annualProductionKwh    Float
+  monthlyProductionJson  String   // JSON: number[12] (kWh/mes)
+  annualSelfConsumptionKwh Float
+  annualSurplusKwh       Float
+  selfConsumptionRatio   Float    // autoconsumo / producción
+  coverageRatio          Float    // autoconsumo / consumo
+  annualSavingEur        Float
+  paybackYears           Float?   // CAPEX / ahorro; null si ahorro ≤ 0
+  computedAt             DateTime @default(now())
+  @@unique([supplyId, lat, lon, kwp, lossPct, tilt, azimuth])  // caché por parámetros
+}
+```
+
+> **Cambios en `Supply`**: añadir la relación inversa `solarSimulations SolarSimulation[]`. No se
+> modifica ningún otro modelo de M01–M05.
+
+> **Caché**: la simulación con los mismos parámetros devuelve la fila existente (no vuelve a llamar a
+> PVGIS). `monthlyProductionJson` guarda los 12 valores mensuales como texto (la serie para el gráfico).
+
+### 8.3 Esquema InfluxDB
+
+M06 **no define measurements nuevos**. Lee `hourly_consumption` (`kwh`) y `pvpc_price` (§3.3). La
+producción de PVGIS es agregado mensual que entra por GraphQL/cache Prisma, no serie en InfluxDB. La
+asignación de `period` (para casar peaje/cargo de energía) y la hora local (para repartir `E_m` por mes y
+por hora del día) usan el mismo calendario tarifario de la ingesta (§3.3).
+
+### 8.4 Algoritmo de cálculo — paso a paso
+
+El cálculo puro vive en `packages/solar-engine` (`simulateSolar`): sin I/O. El servicio obtiene la
+producción mensual de PVGIS, la **reparte a horas** (perfil solar), compone `eurPerKwh` (vía
+`SolarDataSource`, reutilizando M01) y persiste la `SolarSimulation`.
+
+#### Responsabilidad del servicio / data source (construcción de inputs)
+
+| Campo del input | Cómo lo construye el servicio / data source |
+|-----------------|---------------------------------------------|
+| `hours[]` | por cada hora `[rangeStart, rangeEnd)`: `consumptionKwh` de `hourly_consumption`; `productionKwh` = `E_m[mes]` repartido con el perfil solar intradía (campana orto–ocaso, hora local Madrid); `eurPerKwh = pvpc_h + tollEnergy[p] + chargeEnergy[p]` (composición de M01) |
+| `surplusCompensationEurPerKwh` | precio de compensación simplificada de excedentes (mismo que M01, §3.4) |
+| `capexEur` | `kwp × costPerKwp` |
+
+> **Reparto `E_m` → horas (servicio)**: para cada día del mes, `E_m / díasDelMes` se distribuye entre las
+> horas de luz con un peso `w_h` (perfil tipo `max(0, sin(π·(h−orto)/(ocaso−orto)))` normalizado a 1 por
+> día). Determinista, dependiente solo del mes y la latitud (longitud del día). El engine recibe la
+> serie ya repartida.
+
+> Validaciones **antes** de invocar al engine: `SOLAR_INVALID_PARAMS` (lat∉[−90,90], lon∉[−180,180],
+> `kwp ≤ 0`, `lossPct∉[0,100]`), `SUPPLY_NOT_FOUND`, `BACKFILL_*` (§3.5), `NO_CONSUMPTION_DATA` (sin
+> curva), `PVGIS_UNAVAILABLE` (PVGIS no responde y no hay caché).
+
+#### Interfaz del solar-engine
+
+```typescript
+// ─── Input ──────────────────────────────────────────────────────────────────
+
+interface SolarHour {
+  ts: string;          // ISO UTC
+  month: string;       // "YYYY-MM" local (para los buckets mensuales)
+  consumptionKwh: number;
+  productionKwh: number;  // E_m repartido a esta hora (perfil solar)
+  eurPerKwh: number;      // pvpc + peajeE[p] + cargoE[p], ya compuesto (idéntico a M01)
+}
+
+interface SolarInput {
+  hours: SolarHour[];                  // ordenado por ts, cubre el rango
+  surplusCompensationEurPerKwh: number;
+  capexEur: number;                    // kwp × costPerKwp
+}
+
+// ─── Output ─────────────────────────────────────────────────────────────────
+
+interface SolarMonthBucket {
+  key: string; monthStart: string;
+  productionKwh: number; selfConsumptionKwh: number; surplusKwh: number;
+}
+
+interface SolarResult {
+  months: SolarMonthBucket[];          // ordenados por monthStart (evolución)
+  annualProductionKwh: number;
+  annualSelfConsumptionKwh: number;
+  annualSurplusKwh: number;
+  selfConsumptionRatio: number;        // autoconsumo / producción
+  coverageRatio: number;               // autoconsumo / consumo
+  annualSavingEur: number;
+  paybackYears: number | null;         // capex / ahorro; null si ahorro ≤ 0
+}
+
+function simulateSolar(input: SolarInput): SolarResult;
+```
+
+#### Paso 1 — Autoconsumo y excedente por hora
+
+```
+para cada hora h:
+  autoconsumo_h = min(h.productionKwh, h.consumptionKwh)
+  excedente_h   = max(0, h.productionKwh − h.consumptionKwh)
+  ahorro_h      = autoconsumo_h * h.eurPerKwh + excedente_h * surplusCompensationEurPerKwh
+```
+
+#### Paso 2 — Agregación mensual
+
+Por bucket `month`: `productionKwh = Σ`, `selfConsumptionKwh = Σ autoconsumo`, `surplusKwh = Σ excedente`.
+
+#### Paso 3 — Totales, ratios y ahorro
+
+```
+annualProductionKwh      = Σ productionKwh
+annualSelfConsumptionKwh = Σ autoconsumo
+annualSurplusKwh         = Σ excedente
+selfConsumptionRatio     = annualSelfConsumptionKwh / annualProductionKwh
+coverageRatio            = annualSelfConsumptionKwh / Σ consumptionKwh
+annualSavingEur          = Σ ahorro_h
+```
+
+#### Paso 4 — Payback simple
+
+```
+paybackYears = annualSavingEur > 0 ? capexEur / annualSavingEur : null
+```
+
+#### Notas de precisión y redondeo
+
+- Mismo criterio que §3.4 / §4.4 / §5.4 / §6.4 / §7.4: **sin redondeo intermedio**; el engine nunca
+  redondea. Cruce, ahorro, ratios y payback en doble precisión; el redondeo es de presentación.
+- Tests de kWh y € con tolerancia `±0.001`; ratios con `±0.0001`.
+
+### 8.5 Esquema GraphQL
+
+```graphql
+type SolarMonth {
+  monthKey:           String!
+  monthStart:         String!   # ISO 8601 UTC
+  productionKwh:      Float!
+  selfConsumptionKwh: Float!
+  surplusKwh:         Float!
+}
+
+type SolarSimulation {
+  id:                       ID!
+  supplyId:                 String!
+  lat:                      Float!
+  lon:                      Float!
+  kwp:                      Float!
+  lossPct:                  Float!
+  tilt:                     Float!
+  azimuth:                  Float!
+  costPerKwp:               Float!
+  rangeStart:               String!
+  rangeEnd:                 String!
+  annualProductionKwh:      Float!
+  annualSelfConsumptionKwh: Float!
+  annualSurplusKwh:         Float!
+  selfConsumptionRatio:     Float!
+  coverageRatio:            Float!
+  annualSavingEur:          Float!
+  paybackYears:             Float          # null si ahorro ≤ 0
+  computedAt:               String!
+  months:                   [SolarMonth!]! # ordenados por monthStart (evolución)
+}
+
+input SimulateSolarInput {
+  cups:       String!
+  lat:        Float!
+  lon:        Float!
+  kwp:        Float!
+  lossPct:    Float    # default 14
+  tilt:       Float    # default 35
+  azimuth:    Float    # default 0
+  costPerKwp: Float    # default 1000
+}
+
+extend type Query {
+  solarSimulation(id: ID!): SolarSimulation
+  solarSimulations(supplyId: String!): [SolarSimulation!]!
+}
+
+extend type Mutation {
+  # Simula (o devuelve la simulación cacheada por parámetros). Llama a PVGIS on-demand si no hay caché.
+  simulateSolar(input: SimulateSolarInput!): SolarSimulation!
+}
+```
+
+**Errores esperados** (formato GraphQL estándar con `extensions.code`):
+
+| Código | Condición |
+|--------|-----------|
+| `SOLAR_INVALID_PARAMS` | `lat`/`lon` fuera de rango, `kwp ≤ 0`, `lossPct ∉ [0,100]` |
+| `SUPPLY_NOT_FOUND` | El CUPS no existe en PostgreSQL |
+| `BACKFILL_PENDING` / `BACKFILL_RUNNING` / `BACKFILL_FAILED` | El histórico aún no está disponible (§3.5) |
+| `NO_CONSUMPTION_DATA` | No hay curva (`hourly_consumption`) en el rango |
+| `PVGIS_UNAVAILABLE` | PVGIS no responde y no hay simulación cacheada con esos parámetros |
+| `SOLAR_SIMULATION_NOT_FOUND` | `solarSimulation(id)` — *devuelve `null`, no error* (consistente con `alert(id)`) |
+
+> **Autorización** (§2.2): leer (`solarSimulation`, `solarSimulations`) → `assertSupplyAccess`.
+> Escribir (`simulateSolar`) → rol de escritura (DOMINION/ADMIN/GESTOR); `USUARIO` solo lectura.
+
+### 8.6 Casos de test — contrato de implementación
+
+> Los tests del `solar-engine` y del reparto `E_m`→horas son unitarios (sin I/O). Los del resolver/
+> servicio son de integración con Prisma, InfluxDB y PVGIS mockeados. Nomenclatura `TC-SOL-NNN` (§9.1).
+
+#### TC-SOL-001 — Autoconsumo = min(prod, consumo) — Unit
+
+`prod=[2,5]`, `consumo=[3,3]` → `autoconsumo=[2,3]`, `excedente=[0,2]`. Verifica el cruce horario.
+
+#### TC-SOL-002 — Excedente = max(0, prod − consumo) — Unit
+
+Producción nocturna 0 → autoconsumo 0, excedente 0; producción > consumo → excedente positivo.
+
+#### TC-SOL-003 — Ratio de autoconsumo — Unit
+
+`Σautoconsumo=5`, `Σproducción=10` → `selfConsumptionRatio=0.5`.
+
+#### TC-SOL-004 — Ratio de cobertura — Unit
+
+`Σautoconsumo=5`, `Σconsumo=20` → `coverageRatio=0.25`.
+
+#### TC-SOL-005 — Ahorro = coste evitado + compensación — Unit
+
+`autoconsumo=4 @0.20 €/kWh` + `excedente=2 @0.05 €/kWh` → `ahorro = 0.8 + 0.1 = 0.9`. Verifica los dos
+componentes.
+
+#### TC-SOL-006 — Payback simple — Unit
+
+`capex=10000`, `ahorro_anual=2000` → `paybackYears=5`.
+
+#### TC-SOL-007 — Payback null si ahorro ≤ 0 — Unit
+
+`ahorro_anual=0` → `paybackYears=null` (sin división por cero).
+
+#### TC-SOL-008 — Agregación mensual y orden — Unit
+
+Buckets `month` con `production/self/surplus = Σ`; `months` ordenados por `monthStart`.
+
+#### TC-SOL-009 — Reparto E_m → horas (perfil solar) — Unit
+
+`E_m` repartido a las horas de un mes: `Σ producción_h del mes = E_m` (conserva la energía); producción
+**0 de noche** y máxima al mediodía. Verifica la campana y la conservación.
+
+#### TC-SOL-010 — simulateSolar calcula y persiste — Integration
+
+Parámetros válidos + PVGIS + curva → `SolarSimulation` con `months` y ratios. Sin curva →
+`NO_CONSUMPTION_DATA`.
+
+#### TC-SOL-011 — Caché por parámetros (idempotente) — Integration
+
+Segunda llamada con los **mismos** parámetros → devuelve la fila cacheada **sin** volver a llamar a
+PVGIS (por `@@unique`). Cambiar `kwp` → nueva simulación + nueva llamada a PVGIS.
+
+#### TC-SOL-012 — Parámetros inválidos → SOLAR_INVALID_PARAMS — Integration
+
+`lat=120`, `kwp=0` o `lossPct=150` → `SOLAR_INVALID_PARAMS` (no llama a PVGIS, no persiste).
+
+#### TC-SOL-013 — PVGIS caído sin caché → PVGIS_UNAVAILABLE — Integration
+
+PVGIS responde error y no hay simulación cacheada → `PVGIS_UNAVAILABLE`.
+
+#### TC-SOL-014 — Reutiliza la composición de precio de M01 — Integration
+
+El `eurPerKwh` por hora del ahorro coincide con `pvpc_h + tollEnergy[p] + chargeEnergy[p]` (mismos
+maestros que M01/M04).
+
+#### TC-SOL-015 — Backfill no listo → BACKFILL_* — Integration
+
+`backfillStatus = PENDING/RUNNING/FAILED` → `BACKFILL_*` (mismo contrato que §3.7 / … / §7.6).
+
+#### TC-SOL-016 — Consultas y autorización — Integration
+
+`solarSimulations` filtra por supply; `solarSimulation(id)` inexistente → `null`. `USUARIO` sobre
+`simulateSolar` → `FORBIDDEN`; `ADMIN` de otro cliente → `FORBIDDEN` (reglas §2.2).
+
+### 8.7 Front (apps/web) — no normativo en lo visual
+
+> Como en M02–M05, el detalle visual no es contrato; el **flujo de datos** **sí** lo es.
+
+- **Topbar**: nueva entrada **Solar** junto a Pre-factura / Optimización / Alertas / KPI / Huella.
+- **Ruta** `/solar` (protegida por `authGuard`) → `SolarComponent`. Reutiliza `GraphqlService`.
+- **Entradas**: CUPS + `lat`/`lon` + `kWp` + pérdidas (%) + (opcional) inclinación/orientación +
+  `€/kWp`. Defaults: pérdidas 14 %, inclinación 35°, orientación 0° (sur), 1000 €/kWp.
+- **Flujo**: botón **Simular** → `simulateSolar(input)`.
+- **Resultado**: producción anual + **gráfico mensual** (producción vs autoconsumo vs excedente),
+  **ratios** (autoconsumo / cobertura), **ahorro anual €** y **payback** (años, o "no rentable" si
+  `null`). Mensaje de que usa la **curva real** del cliente.
+
+### 8.8 Modo demo (para probar `/solar` sin DBs reales)
+
+Mismo mecanismo de holders que M01–M05 (`runtime.ts`), arrancando con `npm run demo`:
+
+- **`makeDemoSolarDataSource()`**: devuelve una **producción mensual determinista** (forma estacional:
+  más en verano, menos en invierno) y una curva horaria determinista (`hourly_consumption` + `pvpc_price`
+  compuesto), sin `Math.random()`. En `index.ts` se inyecta la fuente real (PVGIS + Flux + maestros); en
+  `demo.ts`, `makeDemoSolarDataSource()`.
+- **`SolarSimulation` demo sembrada** en el store en memoria (`demo/store.ts`): una simulación con ratios
+  y payback realistas para enseñar la pantalla al entrar sin simular.
+- **Delegado Prisma** en `store.ts` para `solarSimulation`, sembrado en ambos CUPS demo.
+- **Resultado esperado documentado**: en demo, `simulateSolar(...)` produce una `SolarSimulation` con
+  `months` (12), `selfConsumptionRatio`/`coverageRatio` en (0,1), `annualSavingEur > 0` y `paybackYears`
+  finito; la segunda llamada con los mismos parámetros devuelve la cacheada (idempotente).
+
+---
+
+## 9. Convenciones de test
 
 > Sección transversal. Se replica la estructura `§N.X Casos de test` en cada módulo M02–M06 siguiendo estas mismas convenciones.
 
-### 7.1 Nomenclatura
+### 9.1 Nomenclatura
 
 `TC-{MOD}-{NNN}`
 
@@ -3351,7 +4195,7 @@ Mismo mecanismo de holders que M01–M03 (`runtime.ts`), arrancando con `npm run
 | `CO2`  | M05 — Huella de carbono |
 | `SOL`  | M06 — Simulación de autoconsumo solar |
 
-### 7.2 Capas
+### 9.2 Capas
 
 | Capa | Descripción | I/O externo |
 |------|-------------|-------------|
@@ -3363,14 +4207,14 @@ Cada caso de test declara su capa en el campo **Módulo** (`— Unit` / `— Int
 
 Los tests de M01 y M02 son Unit e Integration. No se definen tests E2E hasta que exista frontend.
 
-### 7.3 Herramientas
+### 9.3 Herramientas
 
 - **Unit / Integration**: Vitest
 - **Fixtures**: datos sintéticos reutilizables en `apps/api/test/fixtures/`
 - **Mocks HTTP**: `vi.spyOn` sobre los adaptadores de ingesta
 - **Mock DB**: cliente Prisma mockeado con `vi.hoisted` (**no** usar `vitest-mock-extended`); cliente InfluxDB mockeado a nivel de módulo
 
-### 7.4 Cobertura mínima por módulo
+### 9.4 Cobertura mínima por módulo
 
 - pricing-engine (o equivalente de cálculo puro): 100 % de ramas del algoritmo
 - Resolvers GraphQL: todos los errores definidos en `§N.5 Errores esperados`

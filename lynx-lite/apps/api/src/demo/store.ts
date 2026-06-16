@@ -142,6 +142,37 @@ export async function createInMemoryStore() {
   const kpiReports: Row[] = [];
   const kpiReportLines: Row[] = [];
 
+  // M05 — huella de carbono: un informe sembrado para supply-30td (3 meses) con el factor propio
+  // por debajo de la media nacional (deltaPct negativo: "consume más limpio que la media").
+  const carbonReportId = 'carbon-demo-30td';
+  const carbonLine = (monthKey: string, kwh: number, factorAvg: number): Row => ({
+    id: randomUUID(),
+    reportId: carbonReportId,
+    monthKey,
+    monthStart: new Date(`${monthKey}-01T00:00:00.000Z`),
+    kwh,
+    co2Kg: (kwh * factorAvg) / 1000,
+    factorAvg,
+    hasGaps: false,
+  });
+  const carbonReportLines: Row[] = [
+    carbonLine('2026-03', 42000, 235),
+    carbonLine('2026-04', 39500, 228),
+    carbonLine('2026-05', 41000, 240),
+  ];
+  const carbonTotalKwh = (carbonReportLines as { kwh: number }[]).reduce((a, l) => a + l.kwh, 0);
+  const carbonTotalCo2 = (carbonReportLines as { co2Kg: number }[]).reduce((a, l) => a + l.co2Kg, 0);
+  const carbonReports: Row[] = [
+    {
+      id: carbonReportId, supplyId: 'supply-30td',
+      rangeStart: new Date('2026-03-01T00:00:00.000Z'), rangeEnd: new Date('2026-06-01T00:00:00.000Z'),
+      totalKwh: carbonTotalKwh, totalCo2Kg: carbonTotalCo2,
+      ownFactorGPerKwh: (carbonTotalCo2 * 1000) / carbonTotalKwh, nationalAvgFactor: 285,
+      deltaPct: ((carbonTotalCo2 * 1000) / carbonTotalKwh - 285) / 285,
+      hasGaps: false, computedAt: now,
+    },
+  ];
+
   // Helpers de delegate.
   const findUniqueBy = (rows: Row[], where: Row): Row | null => {
     const keys = Object.keys(where);
@@ -452,6 +483,70 @@ export async function createInMemoryStore() {
       deleteMany: async ({ where }: { where: Row }) => {
         for (let i = kpiReportLines.length - 1; i >= 0; i--) {
           if (kpiReportLines[i].reportId === where.reportId) kpiReportLines.splice(i, 1);
+        }
+        return { count: 0 };
+      },
+    },
+
+    carbonReport: {
+      findUnique: async ({ where, include }: { where: Row; include?: Row }) => {
+        let row: Row | null = null;
+        if (where.id) row = carbonReports.find(r => r.id === where.id) ?? null;
+        else if (where.supplyId_rangeStart_rangeEnd) {
+          const k = where.supplyId_rangeStart_rangeEnd as Row;
+          row = carbonReports.find(r =>
+            r.supplyId === k.supplyId &&
+            (r.rangeStart as Date).getTime() === (k.rangeStart as Date).getTime() &&
+            (r.rangeEnd as Date).getTime() === (k.rangeEnd as Date).getTime(),
+          ) ?? null;
+        }
+        if (!row) return null;
+        const out: Row = { ...row };
+        if (include?.lines) out.lines = carbonReportLines.filter(l => l.reportId === row!.id);
+        if (include?.supply) out.supply = supplies.find(s => s.id === row!.supplyId) ?? null;
+        return out;
+      },
+      findMany: async ({ where, orderBy, include }: { where: Row; orderBy?: Row; include?: Row }) => {
+        let list = carbonReports.filter(r => r.supplyId === where.supplyId);
+        if (orderBy && (orderBy as Row).computedAt === 'desc') {
+          list = [...list].sort((a, b) => (b.computedAt as Date).getTime() - (a.computedAt as Date).getTime());
+        }
+        return list.map(r => (include?.lines ? { ...r, lines: carbonReportLines.filter(l => l.reportId === r.id) } : r));
+      },
+      create: async ({ data, include }: { data: Row; include?: Row }) => {
+        const linesSpec = (data.lines as { create?: Row[] } | undefined)?.create ?? [];
+        const { lines, ...rest } = data;
+        void lines;
+        const id = randomUUID();
+        const row: Row = { id, computedAt: new Date(), hasGaps: false, ...rest };
+        carbonReports.push(row);
+        const created = linesSpec.map(l => ({ id: randomUUID(), reportId: id, ...l }));
+        carbonReportLines.push(...created);
+        const out: Row = { ...row };
+        if (include?.lines) out.lines = created;
+        return out;
+      },
+      update: async ({ where, data, include }: { where: Row; data: Row; include?: Row }) => {
+        const row = carbonReports.find(r => r.id === where.id);
+        if (!row) throw new Error('carbonReport no encontrada');
+        const linesSpec = (data.lines as { create?: Row[] } | undefined)?.create;
+        const { lines, ...rest } = data;
+        void lines;
+        Object.assign(row, rest);
+        if (linesSpec) {
+          const created = linesSpec.map(l => ({ id: randomUUID(), reportId: row.id, ...l }));
+          carbonReportLines.push(...created);
+        }
+        const out: Row = { ...row };
+        if (include?.lines) out.lines = carbonReportLines.filter(l => l.reportId === row.id);
+        return out;
+      },
+    },
+
+    carbonReportLine: {
+      deleteMany: async ({ where }: { where: Row }) => {
+        for (let i = carbonReportLines.length - 1; i >= 0; i--) {
+          if (carbonReportLines[i].reportId === where.reportId) carbonReportLines.splice(i, 1);
         }
         return { count: 0 };
       },

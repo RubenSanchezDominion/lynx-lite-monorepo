@@ -9,14 +9,15 @@
     "lynx-lite/packages/optimization-engine",
     "lynx-lite/packages/alerts-engine",
     "lynx-lite/packages/kpi-engine",
+    "lynx-lite/packages/carbon-engine",
     "lynx-lite/packages/data-collector"
   ],
   "scripts": {
-    "build:packages": "npm run build -w @lynx-lite/pricing-engine && npm run build -w @lynx-lite/optimization-engine && npm run build -w @lynx-lite/alerts-engine && npm run build -w @lynx-lite/kpi-engine && npm run build -w @lynx-lite/data-collector",
+    "build:packages": "npm run build -w @lynx-lite/pricing-engine && npm run build -w @lynx-lite/optimization-engine && npm run build -w @lynx-lite/alerts-engine && npm run build -w @lynx-lite/kpi-engine && npm run build -w @lynx-lite/carbon-engine && npm run build -w @lynx-lite/data-collector",
     "prisma:generate": "npm run prisma:generate -w @lynx-lite/api",
     "build:apps": "npm run build -w @lynx-lite/api && npm run build -w @lynx-lite/worker",
     "build": "npm run build:packages && npm run prisma:generate && npm run build:apps",
     "build:web": "npm --prefix lynx-lite/apps/web run build",
-    "test": "npm run test -w @lynx-lite/pricing-engine && npm run test -w @lynx-lite/optimization-engine && npm run test -w @lynx-lite/alerts-engine && npm run test -w @lynx-lite/kpi-engine && npm run test -w @lynx-lite/data-collector && npm run test -w @lynx-lite/api && npm run test -w @lynx-lite/worker"
+    "test": "npm run test -w @lynx-lite/pricing-engine && npm run test -w @lynx-lite/optimization-engine && npm run test -w @lynx-lite/alerts-engine && npm run test -w @lynx-lite/kpi-engine && npm run test -w @lynx-lite/carbon-engine && npm run test -w @lynx-lite/data-collector && npm run test -w @lynx-lite/api && npm run test -w @lynx-lite/worker"
   }
 }

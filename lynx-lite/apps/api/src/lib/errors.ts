@@ -26,7 +26,9 @@ export type ErrorCode =
   | 'KPI_INVALID_ROW'
   | 'KPI_OVERLAPPING_INTERVALS'
   | 'KPI_NO_PRODUCTION_DATA'
-  | 'KPI_UPLOAD_NOT_FOUND';
+  | 'KPI_UPLOAD_NOT_FOUND'
+  // M05
+  | 'CO2_NO_FACTOR_DATA';
 
 export function gqlError(code: ErrorCode, message?: string): GraphQLError {
   return new GraphQLError(message ?? code, { extensions: { code } });

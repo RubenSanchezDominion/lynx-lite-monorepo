@@ -143,6 +143,7 @@ model Supply {
   alertConfig    AlertConfig?
   productionUploads ProductionUpload[]
   kpiReports     KpiReport[]
+  carbonReports  CarbonReport[]
   users          User[]
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
@@ -421,4 +422,37 @@ model KpiReportLine {
   costEur     Float
   eurPerUnit  Float // costEur / units
   isOutlier   Boolean   @default(false)
+}
+
+// ─── M05 — Huella de carbono (SPECS §7.2) ──────────────────────────────────────
+
+// Resultado del cálculo de huella. Idempotente por (supplyId, rangeStart, rangeEnd).
+model CarbonReport {
+  id                String             @id @default(uuid())
+  supplyId          String
+  supply            Supply             @relation(fields: [supplyId], references: [id])
+  rangeStart        DateTime // inicio del periodo (UTC)
+  rangeEnd          DateTime // fin del periodo (UTC)
+  totalKwh          Float
+  totalCo2Kg        Float // emisiones totales kgCO₂eq
+  ownFactorGPerKwh  Float // factor ponderado por consumo (gCO₂/kWh)
+  nationalAvgFactor Float // media temporal del factor en el periodo (gCO₂/kWh)
+  deltaPct          Float // (ownFactor − national) / national
+  hasGaps           Boolean            @default(false)
+  computedAt        DateTime           @default(now())
+  lines             CarbonReportLine[]
+
+  @@unique([supplyId, rangeStart, rangeEnd]) // idempotencia del recálculo
+}
+
+model CarbonReportLine {
+  id         String       @id @default(uuid())
+  reportId   String
+  report     CarbonReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  monthKey   String // "YYYY-MM" (calendario local Madrid)
+  monthStart DateTime // inicio del mes (para ordenar la evolución)
+  kwh        Float
+  co2Kg      Float
+  factorAvg  Float // factor medio del mes (gCO₂/kWh)
+  hasGaps    Boolean      @default(false)
 }
