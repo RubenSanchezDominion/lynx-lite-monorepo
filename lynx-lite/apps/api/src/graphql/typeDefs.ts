@@ -311,6 +311,49 @@ export const typeDefs = /* GraphQL */ `
     to: String! # ISO 8601 (exclusive)
   }
 
+  # ─── Autoconsumo solar (M06) ──────────────────────────────────────────────────
+  type SolarMonth {
+    monthKey: String!
+    monthStart: String! # ISO 8601 UTC
+    productionKwh: Float!
+    selfConsumptionKwh: Float!
+    surplusKwh: Float!
+  }
+
+  type SolarSimulation {
+    id: ID!
+    supplyId: String!
+    lat: Float!
+    lon: Float!
+    kwp: Float!
+    lossPct: Float!
+    tilt: Float!
+    azimuth: Float!
+    costPerKwp: Float!
+    rangeStart: String!
+    rangeEnd: String!
+    annualProductionKwh: Float!
+    annualSelfConsumptionKwh: Float!
+    annualSurplusKwh: Float!
+    selfConsumptionRatio: Float!
+    coverageRatio: Float!
+    annualSavingEur: Float!
+    paybackYears: Float # null si ahorro ≤ 0
+    computedAt: String!
+    months: [SolarMonth!]! # ordenados por monthStart (evolución)
+  }
+
+  input SimulateSolarInput {
+    cups: String!
+    lat: Float!
+    lon: Float!
+    kwp: Float!
+    lossPct: Float # default 14
+    tilt: Float # default 35
+    azimuth: Float # default 0
+    costPerKwp: Float # default 1000
+  }
+
   # ─── Operaciones ────────────────────────────────────────────────────────────
   type Query {
     me: User!
@@ -336,6 +379,9 @@ export const typeDefs = /* GraphQL */ `
 
     carbonReport(id: ID!): CarbonReport
     carbonReports(supplyId: String!): [CarbonReport!]!
+
+    solarSimulation(id: ID!): SolarSimulation
+    solarSimulations(supplyId: String!): [SolarSimulation!]!
   }
 
   type Mutation {
@@ -365,5 +411,7 @@ export const typeDefs = /* GraphQL */ `
     computeKpi(input: ComputeKpiInput!): KpiReport!
 
     computeCarbonFootprint(input: ComputeCarbonInput!): CarbonReport!
+
+    simulateSolar(input: SimulateSolarInput!): SolarSimulation!
   }
 `;

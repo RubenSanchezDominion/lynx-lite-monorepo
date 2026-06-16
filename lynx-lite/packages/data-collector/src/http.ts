@@ -1,6 +1,7 @@
 import { DatadisRateLimitError, type DatadisHttp } from './datadis.js';
 import type { EsiosHttp } from './esios.js';
 import type { RedataHttp } from './redata.js';
+import type { PvgisHttp } from './pvgis.js';
 
 function buildQuery(query: Record<string, string>): string {
   const params = new URLSearchParams(query);
@@ -82,6 +83,23 @@ export function createRedataHttp(config: RedataConfig): RedataHttp {
       const url = `${config.baseUrl}${path}${buildQuery(query)}`;
       const res = await fetch(url);
       if (!res.ok) throw new Error(`REData ${path} → ${res.status}`);
+      return res.json();
+    },
+  };
+}
+
+// ─── Cliente PVGIS (re.jrc.ec.europa.eu, sin autenticación) ─────────────────────
+
+export interface PvgisConfig {
+  baseUrl: string;
+}
+
+export function createPvgisHttp(config: PvgisConfig): PvgisHttp {
+  return {
+    async get(path: string, query: Record<string, string>): Promise<unknown> {
+      const url = `${config.baseUrl}${path}${buildQuery(query)}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`PVGIS ${path} → ${res.status}`);
       return res.json();
     },
   };

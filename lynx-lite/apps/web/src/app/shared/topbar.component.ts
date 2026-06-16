@@ -18,6 +18,7 @@ import { AuthService } from '../services/auth.service';
         <a routerLink="/alertas" routerLinkActive="active">Alertas</a>
         <a routerLink="/kpi" routerLinkActive="active">KPI</a>
         <a routerLink="/huella" routerLinkActive="active">Huella</a>
+        <a routerLink="/solar" routerLinkActive="active">Solar</a>
       </nav>
       <span class="spacer"></span>
       <span class="user" *ngIf="auth.user as u">{{ u.email }} · {{ u.role }}</span>

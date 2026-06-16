@@ -4,6 +4,7 @@ import type { AlertDataSource } from './alertData.js';
 import type { KpiDataSource } from './kpiData.js';
 import type { CarbonDataSource } from './carbonData.js';
 import type { Co2Ingestion } from './carbonIngestion.js';
+import type { SolarDataSource } from './solarData.js';
 import type { EnsureData } from './ingestion.js';
 
 // Holder del DataSource de pre-factura. El bootstrap (src/index.ts) lo inicializa
@@ -92,6 +93,21 @@ export function setCo2Ingestion(fn: Co2Ingestion): void {
 
 export function getCo2Ingestion(): Co2Ingestion | undefined {
   return co2Ingestion;
+}
+
+// Holder del DataSource de autoconsumo solar (M06). Mismo patrón: el bootstrap lo inicializa con la
+// implementación InfluxDB+PVGIS; el demo con un generador determinista; los tests con un mock.
+let solarDataSource: SolarDataSource | null = null;
+
+export function setSolarDataSource(ds: SolarDataSource): void {
+  solarDataSource = ds;
+}
+
+export function getSolarDataSource(): SolarDataSource {
+  if (!solarDataSource) {
+    throw new Error('SolarDataSource no inicializado. Llama a setSolarDataSource() en el arranque.');
+  }
+  return solarDataSource;
 }
 
 // Holder de la ingesta on-demand (opcional). Si no se inicializa, el servicio de

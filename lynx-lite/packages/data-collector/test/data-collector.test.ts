@@ -247,3 +247,38 @@ describe('parseGenerationMix + fetchGenerationMix', () => {
     expect(writeApi.writePoint).toHaveBeenCalledTimes(1);
   });
 });
+
+// ─── M06 — adaptador PVGIS (producción mensual/anual) ──────────────────────────
+
+import { parsePvProduction, fetchPvProduction, type PvgisResponse, type PvgisHttp } from '../src/index.js';
+
+describe('TC-SOL — adaptador PVGIS', () => {
+  const raw: PvgisResponse = {
+    outputs: {
+      monthly: { fixed: [
+        { month: 1, E_m: 500 }, { month: 2, E_m: 600 }, { month: 6, E_m: 1200 }, { month: 12, E_m: 450 },
+      ] },
+      totals: { fixed: { E_y: 9000 } },
+    },
+  };
+
+  it('parsePvProduction mapea E_m por mes (12 posiciones) y E_y', () => {
+    const p = parsePvProduction(raw);
+    expect(p.monthly).toHaveLength(12);
+    expect(p.monthly[0]).toBe(500); // enero
+    expect(p.monthly[5]).toBe(1200); // junio
+    expect(p.monthly[11]).toBe(450); // diciembre
+    expect(p.monthly[2]).toBe(0); // marzo ausente → 0
+    expect(p.annual).toBe(9000);
+  });
+
+  it('fetchPvProduction llama a /api/v5_2/PVcalc con los parámetros mapeados', async () => {
+    const get = vi.fn().mockResolvedValue(raw);
+    const http: PvgisHttp = { get };
+    const p = await fetchPvProduction(http, { lat: 41.65, lon: -0.88, kwp: 10, lossPct: 14, tilt: 35, azimuth: 0 });
+    expect(p.annual).toBe(9000);
+    const [path, query] = get.mock.calls[0];
+    expect(path).toBe('/api/v5_2/PVcalc');
+    expect(query).toMatchObject({ lat: '41.65', lon: '-0.88', peakpower: '10', loss: '14', angle: '35', aspect: '0' });
+  });
+});

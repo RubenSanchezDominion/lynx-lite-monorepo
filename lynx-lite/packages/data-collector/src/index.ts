@@ -36,6 +36,16 @@ export {
 export { EMISSION_COEFFICIENTS } from './emissionCoefficients.js';
 
 export {
+  parsePvProduction,
+  fetchPvProduction,
+  type PvgisMonth,
+  type PvgisResponse,
+  type PvProduction,
+  type PvProductionParams,
+  type PvgisHttp,
+} from './pvgis.js';
+
+export {
   getPeriod,
   periodForUtc,
   parseDatadisLocal,
@@ -49,9 +59,11 @@ export {
   createDatadisHttp,
   createEsiosHttp,
   createRedataHttp,
+  createPvgisHttp,
   type DatadisConfig,
   type EsiosConfig,
   type RedataConfig,
+  type PvgisConfig,
 } from './http.js';
 
 export {

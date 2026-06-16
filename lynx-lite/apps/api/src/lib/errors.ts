@@ -28,7 +28,10 @@ export type ErrorCode =
   | 'KPI_NO_PRODUCTION_DATA'
   | 'KPI_UPLOAD_NOT_FOUND'
   // M05
-  | 'CO2_NO_FACTOR_DATA';
+  | 'CO2_NO_FACTOR_DATA'
+  // M06
+  | 'SOLAR_INVALID_PARAMS'
+  | 'PVGIS_UNAVAILABLE';
 
 export function gqlError(code: ErrorCode, message?: string): GraphQLError {
   return new GraphQLError(message ?? code, { extensions: { code } });

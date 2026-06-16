@@ -144,6 +144,7 @@ model Supply {
   productionUploads ProductionUpload[]
   kpiReports     KpiReport[]
   carbonReports  CarbonReport[]
+  solarSimulations SolarSimulation[]
   users          User[]
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
@@ -455,4 +456,37 @@ model CarbonReportLine {
   co2Kg      Float
   factorAvg  Float // factor medio del mes (gCO₂/kWh)
   hasGaps    Boolean      @default(false)
+}
+
+// ─── M06 — Simulación de autoconsumo solar (SPECS §8.2) ────────────────────────
+
+// Resultado (y caché) de una simulación. La clave única son los parámetros de entrada: recalcular con
+// los mismos parámetros devuelve la fila existente sin volver a llamar a PVGIS.
+model SolarSimulation {
+  id                       String   @id @default(uuid())
+  supplyId                 String
+  supply                   Supply   @relation(fields: [supplyId], references: [id])
+  // Parámetros de entrada (clave de caché)
+  lat                      Float
+  lon                      Float
+  kwp                      Float // potencia pico instalada
+  lossPct                  Float    @default(14)
+  tilt                     Float    @default(35) // inclinación (PVGIS `angle`)
+  azimuth                  Float    @default(0) // orientación (PVGIS `aspect`)
+  costPerKwp               Float    @default(1000) // €/kWp para el CAPEX
+  // Periodo de consumo analizado
+  rangeStart               DateTime
+  rangeEnd                 DateTime
+  // Resultados
+  annualProductionKwh      Float
+  monthlyProductionJson    String // JSON: number[12] (kWh/mes)
+  annualSelfConsumptionKwh Float
+  annualSurplusKwh         Float
+  selfConsumptionRatio     Float // autoconsumo / producción
+  coverageRatio            Float // autoconsumo / consumo
+  annualSavingEur          Float
+  paybackYears             Float? // CAPEX / ahorro; null si ahorro ≤ 0
+  computedAt               DateTime @default(now())
+
+  @@unique([supplyId, lat, lon, kwp, lossPct, tilt, azimuth]) // caché por parámetros
 }

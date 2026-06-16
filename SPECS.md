@@ -4175,6 +4175,38 @@ Mismo mecanismo de holders que M01–M05 (`runtime.ts`), arrancando con `npm run
   `months` (12), `selfConsumptionRatio`/`coverageRatio` en (0,1), `annualSavingEur > 0` y `paybackYears`
   finito; la segunda llamada con los mismos parámetros devuelve la cacheada (idempotente).
 
+### 8.9 Estado de implementación (2026-06-16)
+
+**HECHO y VERIFICADO** (slice completo, como M05; `npm run build` + `npm test` + `npm run build:web` verdes):
+
+- ✅ `packages/solar-engine` — `simulateSolar` puro + 8 unit `TC-SOL-001..008`.
+- ✅ `packages/data-collector` — `pvgis.ts` (`parsePvProduction`, `fetchPvProduction`) + `createPvgisHttp`;
+  tests `TC-SOL` (parse + fetch).
+- ✅ `apps/api` — `solarData.ts` (`loadConsumption` + `fetchProduction`), `solarService.ts` (reparto
+  `E_m`→horas con perfil solar `hourWeightsForMonth`/`hourlyProductionKwh`, caché por parámetros,
+  composición de precio M01, excedentes al PVPC medio), `resolvers/solar.ts`, typeDefs, holder
+  `set/getSolarDataSource`, errores `SOLAR_INVALID_PARAMS`/`PVGIS_UNAVAILABLE`; 1 unit `TC-SOL-009` +
+  10 integración `TC-SOL-010..016`.
+- ✅ Prisma — modelo `SolarSimulation` + relación inversa en `Supply`.
+- ✅ Demo — `demoSolarDataSource.ts` + delegado y seed `solar-demo-30td` en `store.ts`; bootstrap.
+- ✅ Front — ruta `/solar` (`solar.component.ts`) + entrada "Solar" en topbar.
+
+**Desviaciones respecto al spec literal (conscientes):**
+
+1. **Excedentes valorados al PVPC medio del periodo** (`surplusCompensationEurPerKwh = media(pvpc_h)`),
+   no a la "compensación de M01": M01 la tiene a `0` (placeholder v1), que contradiría el modelo de
+   ahorro. Se usa dato de mercado real. *No se modela el tope mensual de la compensación simplificada.*
+2. **`monthlyProductionJson` guarda el desglose mensual COMPLETO** (producción + autoconsumo + excedente),
+   no solo `number[12]`, para poder servir `months` también desde caché sin recalcular.
+
+**PENDIENTE** (deuda consciente):
+
+1. **Calibrar supuestos económicos** antes de dar cifras a cliente: €/kWp (default 1000) y el modelo de
+   compensación de excedentes (PVPC medio, sin tope mensual). El payback es **orientativo**.
+2. **Migración Prisma + validación contra DBs reales** — transversal M01–M06 (`prisma migrate` sin ejecutar).
+3. **`seriescalc`** (serie PV horaria real de PVGIS) — mejora futura; exige ampliar el mock.
+4. **Sin test de front automatizado** para `/solar` (sin infra karma/jasmine; verificación manual).
+
 ---
 
 ## 9. Convenciones de test

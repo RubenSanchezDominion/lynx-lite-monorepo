@@ -173,6 +173,38 @@ export async function createInMemoryStore() {
     },
   ];
 
+  // M06 — autoconsumo solar: una simulación sembrada para supply-30td (12 meses, ratios y payback
+  // realistas) para que /solar muestre datos al entrar sin simular.
+  const solarMonths = [0.55, 0.65, 0.85, 1.1, 1.3, 1.45, 1.45, 1.35, 1.1, 0.85, 0.65, 0.5];
+  const solarFactorSum = solarMonths.reduce((a, b) => a + b, 0);
+  const solarKwp = 40;
+  const solarAnnualProd = solarKwp * 1500 * (1 - 0.14); // ~51600 kWh
+  const solarMonthlyJson = solarMonths.map((f, i) => {
+    const prod = (solarAnnualProd * f) / solarFactorSum;
+    const self = prod * 0.55; // ~55 % autoconsumo
+    return {
+      key: `2025-${String(i + 1).padStart(2, '0')}`,
+      monthStart: new Date(Date.UTC(2025, i, 1)).toISOString(),
+      productionKwh: prod,
+      selfConsumptionKwh: self,
+      surplusKwh: prod - self,
+    };
+  });
+  const solarSelf = solarMonthlyJson.reduce((a, m) => a + m.selfConsumptionKwh, 0);
+  const solarSurplus = solarMonthlyJson.reduce((a, m) => a + m.surplusKwh, 0);
+  const solarSaving = solarSelf * 0.16 + solarSurplus * 0.06; // coste evitado + excedentes
+  const solarSimulations: Row[] = [
+    {
+      id: 'solar-demo-30td', supplyId: 'supply-30td',
+      lat: 41.65, lon: -0.88, kwp: solarKwp, lossPct: 14, tilt: 35, azimuth: 0, costPerKwp: 1000,
+      rangeStart: new Date('2025-01-01T00:00:00.000Z'), rangeEnd: new Date('2026-01-01T00:00:00.000Z'),
+      annualProductionKwh: solarAnnualProd, monthlyProductionJson: JSON.stringify(solarMonthlyJson),
+      annualSelfConsumptionKwh: solarSelf, annualSurplusKwh: solarSurplus,
+      selfConsumptionRatio: solarSelf / solarAnnualProd, coverageRatio: 0.32,
+      annualSavingEur: solarSaving, paybackYears: (solarKwp * 1000) / solarSaving, computedAt: now,
+    },
+  ];
+
   // Helpers de delegate.
   const findUniqueBy = (rows: Row[], where: Row): Row | null => {
     const keys = Object.keys(where);
@@ -549,6 +581,36 @@ export async function createInMemoryStore() {
           if (carbonReportLines[i].reportId === where.reportId) carbonReportLines.splice(i, 1);
         }
         return { count: 0 };
+      },
+    },
+
+    solarSimulation: {
+      findUnique: async ({ where, include }: { where: Row; include?: Row }) => {
+        let row: Row | null = null;
+        if (where.id) row = solarSimulations.find(s => s.id === where.id) ?? null;
+        else if (where.supplyId_lat_lon_kwp_lossPct_tilt_azimuth) {
+          const k = where.supplyId_lat_lon_kwp_lossPct_tilt_azimuth as Row;
+          row = solarSimulations.find(s =>
+            s.supplyId === k.supplyId && s.lat === k.lat && s.lon === k.lon && s.kwp === k.kwp &&
+            s.lossPct === k.lossPct && s.tilt === k.tilt && s.azimuth === k.azimuth,
+          ) ?? null;
+        }
+        if (!row) return null;
+        const out: Row = { ...row };
+        if (include?.supply) out.supply = supplies.find(s => s.id === row!.supplyId) ?? null;
+        return out;
+      },
+      findMany: async ({ where, orderBy }: { where: Row; orderBy?: Row }) => {
+        let list = solarSimulations.filter(s => s.supplyId === where.supplyId);
+        if (orderBy && (orderBy as Row).computedAt === 'desc') {
+          list = [...list].sort((a, b) => (b.computedAt as Date).getTime() - (a.computedAt as Date).getTime());
+        }
+        return list;
+      },
+      create: async ({ data }: { data: Row }) => {
+        const row: Row = { id: randomUUID(), computedAt: new Date(), ...data };
+        solarSimulations.push(row);
+        return row;
       },
     },
 
