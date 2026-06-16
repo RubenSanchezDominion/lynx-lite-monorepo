@@ -18,7 +18,10 @@ export type ErrorCode =
   | 'REGULATORY_DATA_MISSING'
   // M02
   | 'INSUFFICIENT_HISTORY'
-  | 'OPTIMIZATION_NOT_FOUND';
+  | 'OPTIMIZATION_NOT_FOUND'
+  // M03
+  | 'ALERT_NOT_FOUND'
+  | 'ALERT_CONFIG_NOT_FOUND';
 
 export function gqlError(code: ErrorCode, message?: string): GraphQLError {
   return new GraphQLError(message ?? code, { extensions: { code } });

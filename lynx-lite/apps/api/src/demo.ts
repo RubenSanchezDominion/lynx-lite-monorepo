@@ -6,10 +6,11 @@ import { typeDefs } from './graphql/typeDefs.js';
 import { resolvers } from './graphql/resolvers/index.js';
 import { buildContext, type ApolloContext } from './context.js';
 import { setPrisma } from './lib/prisma.js';
-import { setDataSource, setOptimizationDataSource } from './services/runtime.js';
+import { setDataSource, setOptimizationDataSource, setAlertDataSource } from './services/runtime.js';
 import { createInMemoryStore } from './demo/store.js';
 import { makeDemoDataSource } from './demo/demoDataSource.js';
 import { makeDemoOptimizationDataSource } from './demo/demoOptimizationDataSource.js';
+import { makeDemoAlertDataSource } from './demo/demoAlertDataSource.js';
 
 // Bootstrap del MODO DEMO: GraphQL real con datos en memoria (sin Postgres ni InfluxDB).
 // El motor de cálculo es el real; solo cambian los orígenes de datos.
@@ -18,6 +19,7 @@ async function main() {
   setPrisma(store); // inyecta el store en memoria en lugar del PrismaClient real
   setDataSource(makeDemoDataSource()); // series temporales sintéticas
   setOptimizationDataSource(makeDemoOptimizationDataSource()); // curva sintética para M02
+  setAlertDataSource(makeDemoAlertDataSource()); // curva con anomalías sembradas para M03
   // No se inyecta ingesta: los datos del demo se consideran "ya disponibles".
 
   const server = new ApolloServer<ApolloContext>({ typeDefs, resolvers });

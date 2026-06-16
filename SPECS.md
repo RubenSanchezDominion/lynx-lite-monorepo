@@ -12,7 +12,8 @@
 2. [Sistema de usuarios y autenticación](#2-sistema-de-usuarios-y-autenticación)
 3. [M01 — Pre-factura automática](#3-m01--pre-factura-automática)
 4. [M02 — Optimización de potencia contratada](#4-m02--optimización-de-potencia-contratada)
-5. [Convenciones de test](#5-convenciones-de-test)
+5. [M03 — Alertas y detección de anomalías](#5-m03--alertas-y-detección-de-anomalías)
+6. [Convenciones de test](#6-convenciones-de-test)
 
 ---
 
@@ -1701,7 +1702,7 @@ Estado al inicio de M02 (tras la Fase 0, commit de corrección de excesos de M01
   `prisma/migrations`). Los modelos nuevos de M02 (`PowerOptimization`, `PowerOptimizationPeriod`)
   y la relación inversa en `Supply` se añaden al `schema.prisma` y se aplican con `prisma migrate dev`
   cuando exista BD; en tests se usa el cliente mockeado.
-- **Patrón de tests**: Vitest; mock de Prisma con `vi.hoisted` (no `vitest-mock-extended`, ver §5.3).
+- **Patrón de tests**: Vitest; mock de Prisma con `vi.hoisted` (no `vitest-mock-extended`, ver §6.3).
 
 ### 4.1 Fuentes de datos
 
@@ -2096,7 +2097,7 @@ extend type Mutation {
 ### 4.6 Casos de test — contrato de implementación
 
 > Los tests del `optimization-engine` son unitarios (sin I/O). Los del resolver son de
-> integración con Prisma e InfluxDB mockeados. Nomenclatura `TC-OPT-NNN` (§5.1).
+> integración con Prisma e InfluxDB mockeados. Nomenclatura `TC-OPT-NNN` (§6.1).
 
 #### TC-OPT-001 — Percentil 99 + uplift + monotonía (3.0TD, hourly) — Unit
 
@@ -2245,11 +2246,548 @@ Borra y devuelve `true` (elimina antes los `periods`). Id inexistente → `false
 
 ---
 
-## 5. Convenciones de test
+## 5. M03 — Alertas y detección de anomalías
+
+Audita de forma **retrospectiva** la curva de consumo ya ingestada y genera **alertas** de cuatro
+tipos: anomalías estadísticas (`ZSCORE`), consumo en horas de inactividad declarada (`PHANTOM`),
+proximidad al límite de potencia contratada (`LIMIT`) y datos de baja calidad (`ESTIMATED`). A
+diferencia de M01/M02 (que **calculan bajo demanda**), una alerta es un **objeto con estado** que se
+persiste, se acumula y el usuario gestiona (marca como vista o descarta). La detección la realiza un
+**job programado** en `apps/worker`; el cálculo puro vive en un módulo nuevo `packages/alerts-engine`
+(sin I/O). **No es tiempo real**: opera sobre datos D-1/D-2 (los que ya llegaron de DATADIS).
+
+### 5.0 Decisiones de diseño (premisas de este módulo)
+
+> **Latencia D-1/D-2 — auditoría, no monitorización**. DATADIS publica la curva con uno o dos días de
+> retraso (la ingesta diaria de §1.5 solicita **D-2**). M03 **no** puede avisar "en directo": detecta
+> anomalías sobre el último día cerrado disponible. La UI debe comunicarlo explícitamente para no
+> generar la expectativa de tiempo real.
+
+> **Ruptura deliberada del patrón "calcular sin persistir" de M01/M02**. M01 y M02 son consultas que
+> recalculan en cada invocación y dejaron la persistencia aparcada a propósito. Para alertas la
+> persistencia **no es opcional**: sin estado no se puede distinguir una alerta nueva de una ya vista,
+> ni evitar volver a notificar lo mismo cada día. Por eso M03 introduce un **job que persiste** filas
+> `Alert` y resolvers que las **consultan y gestionan** (no las recalculan en cada lectura).
+
+> **Sin notificación automática por correo (v1)**. Las alertas se exponen **in-app** (lista + badges).
+> El envío de notificaciones por email/push queda **fuera de alcance** en v1; si se añade, será como
+> **borrador** que un humano revisa antes de enviar, nunca un envío automático.
+
+1. **`ZSCORE` por slot semanal-horario**. Para cada hora del día evaluado se compara su consumo contra
+   la distribución del **mismo slot** `(día de la semana, hora)` en las **13 semanas** previas (≈ 13
+   muestras, una por semana). Esto absorbe la estacionalidad semanal (un lunes a las 9:00 se compara
+   con lunes a las 9:00, no con domingos). Es la lectura literal de "z-score ventana 13 semanas por
+   slot horario" del brief. **Limitación asumida**: 13 muestras es una base pequeña; se usa desviación
+   típica **muestral** (n−1) y se exige un mínimo de historia (`INSUFFICIENT_HISTORY` si < 13 semanas).
+
+2. **Sensibilidad → umbral de z**. La configuración expone tres niveles que mapean a un umbral de
+   z-score (valor absoluto): `conservador → 3.5`, `equilibrado → 3.0` (default), `agresivo → 2.5`.
+   Un nivel más agresivo genera más alertas (y más ruido). Es un parámetro de entrada del engine,
+   recalibrable sin tocar la fórmula.
+
+3. **`LIMIT` sobre potencia derivada de energía horaria**. Igual que M02 (§4.0 punto 1), la potencia
+   instantánea no está disponible; se deriva `kW = kWh / horasDelIntervalo`. Una alerta `LIMIT` salta
+   cuando esa potencia derivada alcanza `limitThresholdPct` (default **0.95**) de la potencia
+   contratada del período. **Limitación asumida**: subestima el pico real, por lo que `LIMIT` es
+   conservadora (puede no avisar de picos sub-horarios). No sustituye a la facturación de excesos de
+   M01, que usa `max_power` real.
+
+4. **`PHANTOM` sobre franjas declaradas por el cliente**. No hay forma de inferir "inactividad" de los
+   datos; el cliente declara sus franjas (p. ej. noches y findes) en la configuración del suministro.
+   Una alerta `PHANTOM` salta si hay consumo por encima de un umbral (`phantomThresholdKwh`) dentro de
+   una franja declarada como inactiva.
+
+5. **`ESTIMATED` es informativa (calidad de dato)**. Marca los intervalos del día evaluado con
+   `estimated="true"` (DATADIS devolvió `obtainMethod="Estimada"`). No es una anomalía de consumo sino
+   un aviso de fiabilidad; severidad `INFO`. Reutiliza el mismo tag que M01 (§3.3).
+
+### 5.0bis Prerrequisitos de implementación
+
+- **Nuevo paquete `packages/alerts-engine`**: función pura `detectAlerts(input)` y utilidades
+  estadísticas (`mean`, `sampleStd`, `zscore`). Mismo patrón que `optimization-engine`: sin Prisma,
+  sin InfluxDB, 100 % testeable con datos sintéticos. No reutiliza el `pricing-engine` (la detección
+  no comparte fórmula con el cálculo de factura).
+- **Nuevo job en `apps/worker`**: función `evaluateAlerts(deps)` añadida a `scheduler.ts`, envuelta en
+  `safe()` y programada con `node-cron` **después** de la ingesta diaria de consumo (06:00) —
+  propuesta `0 7 * * *`. Recorre los suministros con `AlertConfig` activa, construye los inputs desde
+  InfluxDB y persiste las alertas nuevas.
+- **Nuevos modelos Prisma** `AlertConfig` y `Alert` + relaciones inversas en `Supply`. Como en M01/M02,
+  **no hay migración aplicada** (el repo nunca ha corrido contra Postgres real); se añaden a
+  `schema.prisma` y se aplican con `prisma migrate dev` cuando exista BD. En tests, cliente mockeado.
+- **Data source de serie horaria** (≥ 13 semanas): `AlertDataSource` inyectable (espejo de
+  `PreInvoiceDataSource`/`PowerOptimizationDataSource`), real = Flux contra InfluxDB, demo =
+  generador determinista. Se inyecta vía `runtime.ts` (`setAlertDataSource`/`getAlertDataSource`).
+- **Patrón de tests**: Vitest; mock de Prisma con `vi.hoisted` (no `vitest-mock-extended`, ver §6.3).
+
+### 5.1 Fuentes de datos
+
+| Fuente | Endpoint / origen | Dato obtenido | Uso en M03 |
+|--------|-------------------|---------------|------------|
+| InfluxDB | measurement `hourly_consumption` (`kwh`, `gap="false"`) | Curva horaria del día evaluado + 13 semanas previas | `ZSCORE`, `PHANTOM`, `LIMIT` |
+| InfluxDB | measurement `hourly_consumption` (tag `estimated`) | Marca de dato estimado por DATADIS | `ESTIMATED` |
+| PostgreSQL | `Contract` (último vigente) | Potencias contratadas por período | `LIMIT` (umbral = `limitThresholdPct` × Pc) |
+| PostgreSQL | `AlertConfig` (por suministro) | Sensibilidad, umbrales, franjas de inactividad, tipos activos | Parámetros de detección |
+
+> **Sin ingesta nueva**: M03 consume datos que ya carga M01 (`hourly_consumption`) mediante el backfill
+> de onboarding (2 años) y el job diario (§1.5). No añade measurements, no llama a DATADIS/ESIOS durante
+> la evaluación.
+>
+> **Historia mínima**: el `ZSCORE` exige al menos **13 semanas** (≈ 91 días) de curva para tener una
+> muestra por slot. Si la ventana de referencia tiene menos → `INSUFFICIENT_HISTORY`. `PHANTOM`,
+> `LIMIT` y `ESTIMATED` solo necesitan el día evaluado, pero la evaluación se aborta igual si falta
+> historia para el `ZSCORE` cuando ese tipo está activo.
+
+### 5.2 Modelos Prisma
+
+```prisma
+// ─── Configuración de alertas por suministro (M03) ───────────────────────────
+
+enum AlertSensitivity {
+  CONSERVADOR   // z-threshold 3.5
+  EQUILIBRADO   // z-threshold 3.0 (default)
+  AGRESIVO      // z-threshold 2.5
+}
+
+enum AlertType   { ZSCORE  PHANTOM  LIMIT  ESTIMATED }
+enum AlertStatus { NEW  ACKNOWLEDGED  DISMISSED }
+enum AlertSeverity { INFO  WARNING  CRITICAL }
+
+model AlertConfig {
+  id                 String           @id @default(uuid())
+  supplyId           String           @unique          // 1 config por suministro
+  supply             Supply           @relation(fields: [supplyId], references: [id])
+  enabled            Boolean          @default(true)
+  sensitivity        AlertSensitivity @default(EQUILIBRADO)
+  enabledTypes       String           // CSV de AlertType activos, p.ej. "ZSCORE,PHANTOM,LIMIT,ESTIMATED"
+  limitThresholdPct  Float            @default(0.95)    // fracción de la potencia contratada (LIMIT)
+  phantomThresholdKwh Float           @default(0.0)     // consumo mínimo en franja inactiva para PHANTOM
+  inactivityWindows  Json             // [{ "days":[0..6], "from":"HH:MM", "to":"HH:MM" }] hora local Madrid
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+}
+
+// ─── Alerta detectada (M03) ──────────────────────────────────────────────────
+
+model Alert {
+  id             String        @id @default(uuid())
+  supplyId       String
+  supply         Supply        @relation(fields: [supplyId], references: [id])
+  type           AlertType
+  severity       AlertSeverity
+  status         AlertStatus   @default(NEW)
+  period         Int           // 1–6 (período del intervalo); 0 si no aplica
+  windowStart    DateTime      // inicio del intervalo anómalo (UTC)
+  windowEnd      DateTime      // fin del intervalo anómalo (UTC)
+  observedValue  Float         // valor observado (kWh, kW o z-score según tipo)
+  expectedValue  Float?        // referencia esperada (media del slot, umbral, Pc); null si no aplica
+  deviation      Float?        // desvío (z-score o ratio sobre el umbral); null si no aplica
+  message        String        // descripción legible generada por el engine
+  detectedAt     DateTime      @default(now())
+  acknowledgedBy String?       // userId que la gestionó
+  acknowledgedAt DateTime?
+  @@unique([supplyId, type, windowStart, period])  // idempotencia del job (no re-crea la misma)
+}
+```
+
+> **Cambios en `Supply`**: añadir las relaciones inversas `alerts Alert[]` y `alertConfig AlertConfig?`.
+> No se modifica ningún otro modelo de M01/M02.
+
+> **Idempotencia y estado**: el `@@unique([supplyId, type, windowStart, period])` garantiza que una
+> re-ejecución del job sobre el mismo día **no duplica** alertas. Si la alerta ya existe y está
+> `ACKNOWLEDGED`/`DISMISSED`, el job la **respeta** (no la revierte a `NEW`). `enabledTypes` y las
+> franjas se guardan como texto/JSON por portabilidad (SQLite en demo, Postgres en prod).
+
+### 5.3 Esquema InfluxDB
+
+M03 **no define measurements nuevos**. Lee `hourly_consumption` (§3.3): el `kwh` con `gap="false"`
+para `ZSCORE`/`PHANTOM`/`LIMIT`, y el tag `estimated` para `ESTIMATED`. La asignación de `period` y la
+hora local (para casar las franjas de inactividad declaradas en hora de Madrid) usan el mismo
+calendario tarifario de la ingesta (§3.3).
+
+> Para `LIMIT` se reutiliza la derivación de potencia de M02 (`kW = kWh / horasDelIntervalo`; ×4 en
+> 15 min). `max_power` (§3.3) **no** se usa en M03: la alerta es preventiva sobre la curva, no sobre el
+> máximo facturado.
+
+### 5.4 Algoritmo de detección — paso a paso
+
+El cálculo puro vive en `packages/alerts-engine` (`detectAlerts`): sin I/O, sin Prisma, sin InfluxDB.
+El job (o el resolver de evaluación manual) carga la curva desde InfluxDB mediante un
+`AlertDataSource` inyectable, construye el input y persiste las alertas resultantes.
+
+#### Responsabilidad del job / data source (construcción de los inputs)
+
+Para evaluar el día objetivo `D` (por defecto **D-2**, el último día cerrado en InfluxDB), el job
+construye desde InfluxDB:
+
+| Campo del input | Cómo lo construye el job / data source |
+|-----------------|----------------------------------------|
+| `targetDay[]` | intervalos `(tsLocal, period, kwh, estimated)` del día `D` (`gap="false"` salvo para detectar `ESTIMATED`) |
+| `referenceBySlot["DOW-HH"]` | array de `kwh` del mismo slot `(día de la semana, hora)` en las 13 semanas previas a `D` (`gap="false"`) |
+| `contractedPower` | potencias por período del `Contract` vigente (para `LIMIT`) |
+| `config` | `sensitivity`, `enabledTypes`, `limitThresholdPct`, `phantomThresholdKwh`, `inactivityWindows` de `AlertConfig` |
+| `intervalHours` | 1 ó 0.25 según la resolución real de la curva (para derivar potencia en `LIMIT`) |
+
+> La historia mínima (13 semanas) se valida **antes** de invocar al engine si `ZSCORE` está activo; si
+> falta → `INSUFFICIENT_HISTORY`. Si no hay ningún punto `gap="false"` del día objetivo →
+> `NO_CONSUMPTION_DATA`. Si falta `Contract` vigente y `LIMIT` está activo → `CONTRACT_NOT_FOUND`.
+
+#### Interfaz del alerts-engine
+
+```typescript
+// ─── Input ──────────────────────────────────────────────────────────────────
+
+interface AlertInterval {
+  ts: string;        // ISO UTC, inicio del intervalo
+  localHour: number; // 0–23 hora local Madrid (para franjas y slot)
+  weekday: number;   // 0–6 (0 = domingo) hora local
+  period: number;    // 1–6 (período tarifario del intervalo)
+  kwh: number;
+  estimated: boolean; // DATADIS devolvió obtainMethod="Estimada" → alimenta ESTIMATED
+  gap: boolean;      // estimado o imputado (no facturable); ZSCORE/PHANTOM/LIMIT lo ignoran
+}
+
+interface InactivityWindow { days: number[]; from: string; to: string; } // "HH:MM" hora local
+
+interface AlertDetectionInput {
+  targetDay: AlertInterval[];                       // intervalos del día evaluado
+  referenceBySlot: Record<string, number[]>;        // "DOW-HH" → kWh de las 13 semanas previas
+  contractedPower: Record<string, number>;          // por período (kW)
+  intervalHours: number;                            // 1 | 0.25
+  config: {
+    enabledTypes: ('ZSCORE'|'PHANTOM'|'LIMIT'|'ESTIMATED')[];
+    sensitivity: 'CONSERVADOR'|'EQUILIBRADO'|'AGRESIVO';
+    limitThresholdPct: number;                      // default 0.95
+    phantomThresholdKwh: number;                    // default 0
+    inactivityWindows: InactivityWindow[];
+  };
+}
+
+// ─── Output ─────────────────────────────────────────────────────────────────
+
+interface DetectedAlert {
+  type: 'ZSCORE'|'PHANTOM'|'LIMIT'|'ESTIMATED';
+  severity: 'INFO'|'WARNING'|'CRITICAL';
+  period: number;            // 1–6; 0 si no aplica
+  windowStart: string;       // ISO UTC
+  windowEnd: string;         // ISO UTC
+  observedValue: number;
+  expectedValue: number | null;
+  deviation: number | null;  // z-score o ratio sobre umbral
+  message: string;
+}
+
+function detectAlerts(input: AlertDetectionInput): DetectedAlert[];
+```
+
+#### Paso 1 — `ZSCORE` (anomalía estadística por slot)
+
+`zThreshold = { CONSERVADOR: 3.5, EQUILIBRADO: 3.0, AGRESIVO: 2.5 }[sensitivity]`.
+
+Para cada intervalo del día objetivo con clave de slot `key = "${weekday}-${localHour}"`:
+
+```
+ref = referenceBySlot[key]              // ≈ 13 valores (uno por semana)
+μ   = mean(ref)
+σ   = sampleStd(ref)                    // desviación típica muestral (n−1)
+Si σ === 0:  no se evalúa (sin variabilidad → sin anomalía)   // evita 0/0
+Si no:       z = (kwh − μ) / σ
+             Si |z| ≥ zThreshold → alerta ZSCORE
+```
+
+- `observedValue = kwh`, `expectedValue = μ`, `deviation = z`.
+- `severity`: `WARNING` si `|z| < zThreshold + 1.5`, `CRITICAL` si `|z| ≥ zThreshold + 1.5`.
+
+> Solo se eleva la alerta para desviaciones **al alza** (`z ≥ +zThreshold`, picos) y a la baja
+> (`z ≤ −zThreshold`, caídas atípicas que pueden indicar parada no planificada). Ambas se marcan; el
+> `message` distingue "consumo anómalamente alto/bajo".
+
+#### Paso 2 — `PHANTOM` (consumo en inactividad declarada)
+
+Para cada intervalo cuyo `(weekday, localHour)` cae dentro de alguna `inactivityWindow`:
+
+```
+Si kwh > phantomThresholdKwh → alerta PHANTOM
+```
+
+- `observedValue = kwh`, `expectedValue = phantomThresholdKwh`, `deviation = kwh − phantomThresholdKwh`.
+- `severity`: `WARNING` (consumo fantasma sostenido en franja declarada inactiva). Franjas que cruzan
+  medianoche (`from > to`, p. ej. 22:00→06:00) se interpretan como `[from, 24:00) ∪ [00:00, to)`.
+
+#### Paso 3 — `LIMIT` (proximidad al límite contratado)
+
+```
+kw        = kwh / intervalHours                       // potencia derivada del intervalo
+limit[Pi] = limitThresholdPct × contractedPower[Pi]
+Si kw ≥ limit[period] → alerta LIMIT
+```
+
+- `observedValue = kw`, `expectedValue = contractedPower[period]`, `deviation = kw / contractedPower[period]`.
+- `severity`: `WARNING` si `kw < contractedPower[period]`, `CRITICAL` si `kw ≥ contractedPower[period]`
+  (ya en o por encima de lo contratado → riesgo de exceso facturable).
+
+#### Paso 4 — `ESTIMATED` (calidad de dato)
+
+```
+Para cada intervalo del día objetivo con estimated === true → alerta ESTIMATED (severity INFO)
+```
+
+- `observedValue = kwh`, `expectedValue = null`, `deviation = null`. Es un aviso de fiabilidad, no de
+  consumo. Solo se emite si `ESTIMATED ∈ enabledTypes`.
+
+#### Paso 5 — Persistencia idempotente (responsabilidad del job, no del engine)
+
+El engine devuelve **candidatas**; el job las persiste respetando el estado existente:
+
+```
+Para cada candidata c con clave k = (supplyId, c.type, c.windowStart, c.period):
+  existing = Alert.findUnique(k)
+  Si no existe:                  create(c, status = NEW)
+  Si existe y status = NEW:      update campos derivados (severity, valores) — sigue NEW
+  Si existe y status ∈ {ACKNOWLEDGED, DISMISSED}:  no tocar (respeta la gestión del usuario)
+```
+
+> Una alerta gestionada no "revive" si el job vuelve a verla el mismo día. Alertas de días distintos
+> tienen `windowStart` distinto → son entradas distintas (el usuario ve la recurrencia).
+
+#### Notas de precisión y redondeo
+
+- Mismo criterio que §3.4 y §4.4: **sin redondeo intermedio**; el engine nunca redondea. Media,
+  desviación y z-score se calculan en doble precisión; el redondeo a 2 decimales es solo de presentación.
+- Los tests de z-score validan con tolerancia `±0.001`; los de consumo/potencia con `±0.001`.
+
+### 5.5 Esquema GraphQL
+
+```graphql
+type Alert {
+  id:            ID!
+  supplyId:      String!
+  type:          String!   # "ZSCORE" | "PHANTOM" | "LIMIT" | "ESTIMATED"
+  severity:      String!   # "INFO" | "WARNING" | "CRITICAL"
+  status:        String!   # "NEW" | "ACKNOWLEDGED" | "DISMISSED"
+  period:        Int!
+  windowStart:   String!   # ISO 8601 UTC
+  windowEnd:     String!
+  observedValue: Float!
+  expectedValue: Float
+  deviation:     Float
+  message:       String!
+  detectedAt:    String!
+  acknowledgedBy: String
+  acknowledgedAt: String
+}
+
+type AlertConfig {
+  id:                  ID!
+  supplyId:            String!
+  enabled:             Boolean!
+  sensitivity:         String!   # "CONSERVADOR" | "EQUILIBRADO" | "AGRESIVO"
+  enabledTypes:        [String!]!
+  limitThresholdPct:   Float!
+  phantomThresholdKwh: Float!
+  inactivityWindows:   [InactivityWindow!]!
+  updatedAt:           String!
+}
+
+type InactivityWindow { days: [Int!]!  from: String!  to: String! }
+
+input InactivityWindowInput { days: [Int!]!  from: String!  to: String! }
+
+input AlertConfigInput {
+  cups:                String!
+  enabled:             Boolean
+  sensitivity:         String     # default "EQUILIBRADO"
+  enabledTypes:        [String!]
+  limitThresholdPct:   Float      # default 0.95
+  phantomThresholdKwh: Float      # default 0
+  inactivityWindows:   [InactivityWindowInput!]
+}
+
+input EvaluateAlertsInput {
+  cups: String!
+  day:  String   # "YYYY-MM-DD"; default = último día cerrado (D-2)
+}
+
+extend type Query {
+  # Lista las alertas de un suministro (filtrables), ordenadas por windowStart desc.
+  alerts(supplyId: String!, status: String, type: String, limit: Int, offset: Int): [Alert!]!
+  alert(id: ID!): Alert
+  alertConfig(supplyId: String!): AlertConfig
+}
+
+extend type Mutation {
+  # Crea o actualiza la configuración del suministro (idempotente por supplyId).
+  saveAlertConfig(input: AlertConfigInput!): AlertConfig!
+
+  # Disparo manual de la evaluación (útil en demo sin cron). Persiste y devuelve las alertas.
+  evaluateAlerts(input: EvaluateAlertsInput!): [Alert!]!
+
+  acknowledgeAlert(id: ID!): Alert!
+  dismissAlert(id: ID!): Alert!
+}
+```
+
+**Errores esperados** (formato GraphQL estándar con `extensions.code`):
+
+| Código | Condición |
+|--------|-----------|
+| `SUPPLY_NOT_FOUND` | El CUPS no existe en PostgreSQL |
+| `BACKFILL_PENDING` / `BACKFILL_RUNNING` / `BACKFILL_FAILED` | El histórico aún no está disponible (§3.5) |
+| `ALERT_CONFIG_NOT_FOUND` | Se solicita evaluar un suministro sin `AlertConfig` |
+| `CONTRACT_NOT_FOUND` | `LIMIT` activo y no hay contrato vigente del que leer las potencias |
+| `INSUFFICIENT_HISTORY` | `ZSCORE` activo y menos de 13 semanas de curva de referencia |
+| `NO_CONSUMPTION_DATA` | No hay puntos `gap="false"` del día evaluado |
+| `ALERT_NOT_FOUND` | `acknowledgeAlert`/`dismissAlert` sobre un id inexistente |
+
+> **Autorización** (§2.2): ver/listar (`alerts`, `alert`, `alertConfig`) → `assertSupplyAccess`
+> (DOMINION todo; ADMIN su cliente; GESTOR/USUARIO su suministro). Escribir (`saveAlertConfig`,
+> `evaluateAlerts`, `acknowledgeAlert`, `dismissAlert`) → rol de escritura (DOMINION/ADMIN/GESTOR);
+> `USUARIO` es **solo lectura** (mismo criterio que `savePreInvoice`/`savePowerOptimization`).
+
+### 5.6 Casos de test — contrato de implementación
+
+> Los tests del `alerts-engine` son unitarios (sin I/O). Los del resolver y el job son de integración
+> con Prisma e InfluxDB mockeados. Nomenclatura `TC-ALT-NNN` (§6.1).
+
+#### TC-ALT-001 — ZSCORE dispara con z ≥ umbral (equilibrado) — Unit
+
+Slot con `ref = [10,10,11,9,10,10,11,9,10,10,11,9,10]` (μ=10, σ≈0.7) y `kwh = 13` → `z ≈ 4.2 ≥ 3.0`
+→ alerta `ZSCORE`, `deviation ≈ 4.2`. Como `|z| < umbral + 1.5 (= 4.5)`, severidad `WARNING`. Verifica
+μ, σ muestral (n−1) y el umbral 3.0.
+
+#### TC-ALT-002 — Sensibilidad cambia el umbral — Unit
+
+Mismo dato con `z = 2.8`: `agresivo` (2.5) → dispara; `equilibrado` (3.0) y `conservador` (3.5) → no.
+
+#### TC-ALT-003 — σ = 0 no produce falso positivo — Unit
+
+`ref = [10,10,…,10]` (consumo constante) y `kwh = 25` → `σ = 0` → **no** se evalúa (sin división por
+cero, sin alerta). Confirma el guard del Paso 1.
+
+#### TC-ALT-004 — PHANTOM en franja de inactividad — Unit
+
+`inactivityWindows = [{days:[0..6], from:"22:00", to:"06:00"}]`, intervalo a las 03:00 local con
+`kwh = 4 > phantomThresholdKwh (1)` → alerta `PHANTOM`. Verifica el manejo de la franja que cruza
+medianoche.
+
+#### TC-ALT-005 — Consumo en franja activa no genera PHANTOM — Unit
+
+Mismo `kwh = 4` a las 12:00 (fuera de franja inactiva) → sin alerta `PHANTOM`.
+
+#### TC-ALT-006 — LIMIT al alcanzar 95 % de la potencia — Unit
+
+`contractedPower[P1] = 10 kW`, `intervalHours = 1`. `kwh = 9.6` → `kw = 9.6 ≥ 9.5` → alerta `LIMIT`
+(`WARNING`). `kwh = 10.2` → `kw ≥ 10` → `CRITICAL`. `kwh = 9.0` → sin alerta.
+
+#### TC-ALT-007 — LIMIT en 15 min deriva ×4 — Unit
+
+`intervalHours = 0.25`, `kwh = 2.5` → `kw = 10`. Verifica la derivación de potencia cuartohoraria.
+
+#### TC-ALT-008 — ESTIMATED marca intervalos estimados — Unit
+
+Intervalo con `estimated = true` → alerta `ESTIMATED` (`INFO`, `expectedValue = null`). Con
+`estimated = false` → sin alerta.
+
+#### TC-ALT-009 — enabledTypes desactiva un tipo — Unit
+
+Con `enabledTypes = ['LIMIT']`, datos que dispararían `ZSCORE`/`PHANTOM`/`ESTIMATED` no generan nada;
+solo se evalúa `LIMIT`.
+
+#### TC-ALT-010 — Histórico insuficiente → INSUFFICIENT_HISTORY — Integration
+
+`ZSCORE` activo y < 13 semanas de referencia → el resolver/job eleva `INSUFFICIENT_HISTORY` y no
+invoca al engine.
+
+#### TC-ALT-011 — saveAlertConfig idempotente por suministro — Integration
+
+Dos llamadas con el mismo `cups` actualizan la **misma** `AlertConfig` (no duplican), por el
+`@unique(supplyId)`. La segunda refleja los nuevos valores.
+
+#### TC-ALT-012 — acknowledgeAlert cambia el estado — Integration
+
+`NEW → ACKNOWLEDGED`, fija `acknowledgedBy`/`acknowledgedAt`. Id inexistente → `ALERT_NOT_FOUND`.
+
+#### TC-ALT-013 — dismissAlert descarta — Integration
+
+`NEW → DISMISSED`. Una alerta `DISMISSED` no reaparece como `NEW` al reevaluar el mismo día (ver
+TC-ALT-018).
+
+#### TC-ALT-014 — alerts(list) con filtros y paginación — Integration
+
+Filtra por `status`/`type`; orden `windowStart desc`; `limit`/`offset` delegados a Prisma. Supply
+inexistente → `SUPPLY_NOT_FOUND`.
+
+#### TC-ALT-015 — alert(id) inexistente → null — Integration
+
+Id que no existe → `null` (sin error). `ADMIN` de otro cliente → `FORBIDDEN`.
+
+#### TC-ALT-016 — Autorización — Integration
+
+`USUARIO` sobre `saveAlertConfig`/`acknowledgeAlert`/`dismissAlert`/`evaluateAlerts` → `FORBIDDEN`.
+`ADMIN` de otro cliente sobre `alerts` de un supply ajeno → `FORBIDDEN` (reglas de §2.2).
+
+#### TC-ALT-017 — evaluateAlerts manual persiste alertas — Integration
+
+Día con un pico → `evaluateAlerts` devuelve y persiste las alertas (`status = NEW`). Sin `AlertConfig`
+→ `ALERT_CONFIG_NOT_FOUND`.
+
+#### TC-ALT-018 — Idempotencia del job: no revive gestionadas — Integration
+
+Tras marcar una alerta `ACKNOWLEDGED`, reevaluar el mismo día **no** crea un duplicado ni la revierte a
+`NEW` (por `@@unique` + lógica del Paso 5).
+
+#### TC-ALT-019 — Backfill no listo → BACKFILL_* — Integration
+
+`backfillStatus = PENDING/RUNNING/FAILED` → `BACKFILL_PENDING`/`BACKFILL_RUNNING`/`BACKFILL_FAILED`
+(mismo contrato que §3.7 / §4.6).
+
+#### TC-ALT-020 — Sin curva del día → NO_CONSUMPTION_DATA — Integration
+
+No hay puntos `gap="false"` del día evaluado → `NO_CONSUMPTION_DATA`.
+
+#### TC-ALT-021 — LIMIT sin contrato → CONTRACT_NOT_FOUND — Integration
+
+`LIMIT` activo y sin `Contract` vigente para el CUPS → `CONTRACT_NOT_FOUND`.
+
+### 5.7 Front (apps/web) — no normativo
+
+> Como en M02 (§4.7), el front no es contrato de implementación; documenta la pantalla implementada
+> para enseñar el módulo en modo demo. Se priorizó la **claridad sobre la exhaustividad**: se exponen
+> solo las opciones necesarias y en lenguaje llano.
+
+- **Topbar**: nueva entrada **Alertas** junto a Pre-factura / Optimización (`shared/topbar.component.ts`).
+- **Ruta** `/alertas` (protegida por `authGuard`) → `AlertsComponent`. Reutiliza `GraphqlService`.
+- **Dos tarjetas** únicamente:
+  1. **Suministro + ajustes** (con una **leyenda lateral** "¿qué es cada alarma?" en lenguaje llano:
+     Anomalía / Consumo fantasma / Cerca del límite / Dato estimado). Contiene: selector de suministro,
+     *sensibilidad* (Pocas / Equilibrado / Muchas → CONSERVADOR/EQUILIBRADO/AGRESIVO), *interruptores de
+     tipo* (qué alarmas activar) y el botón **Analizar último día**.
+  2. **Alarmas encontradas**: lista con badge de **tipo** (la franja lateral de color va por **tipo**,
+     no por severidad), fecha/hora local, mensaje y acciones **Vista** (`acknowledgeAlert`) /
+     **Descartar** (`dismissAlert`) cuando la alerta está en `NEW`.
+- **Acción única "Analizar último día"**: persiste los ajustes actuales (`saveAlertConfig`), ejecuta
+  `evaluateAlerts` y muestra **solo los tipos activos** (filtra en cliente las alarmas persistidas de
+  tipos desactivados). No hay botón de guardar separado ni filtros de estado/tipo.
+- **Configuración simplificada**: en pantalla solo se editan *sensibilidad* y *tipos activos*. Los
+  umbrales (`limitThresholdPct`, `phantomThresholdKwh`) y las franjas de inactividad **no se editan en
+  la UI**, pero se cargan y se **reenvían intactos** al guardar (para no romper, p. ej., el `PHANTOM`,
+  que necesita sus franjas). La severidad no se muestra en esta versión de la demo.
+- **Paleta**: los tipos usan solo tonos de **azul y amarillo** (Anomalía azul oscuro · Fantasma azul
+  medio · Límite ámbar · Estimado amarillo suave).
+- **Comportamiento**: la lista arranca vacía y **se vacía al cambiar de suministro** (hay que volver a
+  pulsar *Analizar*). No hay banner de latencia (se omitió para simplificar; el aviso D-1/D-2 queda
+  como decisión de producto si se reincorpora).
+- **Demo**: un `demoAlertDataSource` genera ≥ 13 semanas de curva determinista con anomalías sembradas
+  (un pico para `ZSCORE`, consumo nocturno para `PHANTOM`, una hora cerca del límite para `LIMIT`, un
+  intervalo `estimated` para `ESTIMATED`), de modo que `evaluateAlerts` produzca los cuatro tipos. La
+  `AlertConfig` viene **sembrada** para ambos CUPS demo (incluida la franja de inactividad nocturna).
+
+---
+
+## 6. Convenciones de test
 
 > Sección transversal. Se replica la estructura `§N.X Casos de test` en cada módulo M02–M06 siguiendo estas mismas convenciones.
 
-### 5.1 Nomenclatura
+### 6.1 Nomenclatura
 
 `TC-{MOD}-{NNN}`
 
@@ -2263,7 +2801,7 @@ Borra y devuelve `true` (elimina antes los `periods`). Id inexistente → `false
 | `CO2`  | M05 — Huella de carbono |
 | `SOL`  | M06 — Simulación de autoconsumo solar |
 
-### 5.2 Capas
+### 6.2 Capas
 
 | Capa | Descripción | I/O externo |
 |------|-------------|-------------|
@@ -2275,14 +2813,14 @@ Cada caso de test declara su capa en el campo **Módulo** (`— Unit` / `— Int
 
 Los tests de M01 y M02 son Unit e Integration. No se definen tests E2E hasta que exista frontend.
 
-### 5.3 Herramientas
+### 6.3 Herramientas
 
 - **Unit / Integration**: Vitest
 - **Fixtures**: datos sintéticos reutilizables en `apps/api/test/fixtures/`
 - **Mocks HTTP**: `vi.spyOn` sobre los adaptadores de ingesta
 - **Mock DB**: cliente Prisma mockeado con `vi.hoisted` (**no** usar `vitest-mock-extended`); cliente InfluxDB mockeado a nivel de módulo
 
-### 5.4 Cobertura mínima por módulo
+### 6.4 Cobertura mínima por módulo
 
 - pricing-engine (o equivalente de cálculo puro): 100 % de ramas del algoritmo
 - Resolvers GraphQL: todos los errores definidos en `§N.5 Errores esperados`

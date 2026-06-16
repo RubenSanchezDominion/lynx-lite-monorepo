@@ -105,6 +105,15 @@ export async function createInMemoryStore() {
   const preInvoices: Row[] = [];
   const powerOptimizations: Row[] = [];
 
+  // M03 — alertas (vacías al arrancar) + config sembrada por suministro (franja inactiva nocturna).
+  const alerts: Row[] = [];
+  const defaultWindows = [{ days: [0, 1, 2, 3, 4, 5, 6], from: '00:00', to: '06:00' }];
+  const alertConfigs: Row[] = ['supply-20td', 'supply-30td'].map(supplyId => ({
+    id: randomUUID(), supplyId, enabled: true, sensitivity: 'EQUILIBRADO',
+    enabledTypes: 'ZSCORE,PHANTOM,LIMIT,ESTIMATED', limitThresholdPct: 0.95, phantomThresholdKwh: 1,
+    inactivityWindows: defaultWindows, createdAt: now, updatedAt: now,
+  }));
+
   // Helpers de delegate.
   const findUniqueBy = (rows: Row[], where: Row): Row | null => {
     const keys = Object.keys(where);
@@ -265,6 +274,70 @@ export async function createInMemoryStore() {
       },
     },
 
+    alertConfig: {
+      findUnique: async ({ where }: { where: Row }) => {
+        if (where.id) return alertConfigs.find(c => c.id === where.id) ?? null;
+        return alertConfigs.find(c => c.supplyId === where.supplyId) ?? null;
+      },
+      create: async ({ data }: { data: Row }) => {
+        const row: Row = { id: randomUUID(), createdAt: new Date(), updatedAt: new Date(), ...data };
+        alertConfigs.push(row);
+        return row;
+      },
+      update: async ({ where, data }: { where: Row; data: Row }) => {
+        const row = where.id
+          ? alertConfigs.find(c => c.id === where.id)
+          : alertConfigs.find(c => c.supplyId === where.supplyId);
+        if (!row) throw new Error('alertConfig no encontrada');
+        Object.assign(row, data, { updatedAt: new Date() });
+        return row;
+      },
+    },
+
+    alert: {
+      findUnique: async ({ where, include }: { where: Row; include?: Row }) => {
+        let row: Row | null = null;
+        if (where.id) row = alerts.find(a => a.id === where.id) ?? null;
+        else if (where.supplyId_type_windowStart_period) {
+          const k = where.supplyId_type_windowStart_period as Row;
+          row = alerts.find(a =>
+            a.supplyId === k.supplyId &&
+            a.type === k.type &&
+            (a.windowStart as Date).getTime() === (k.windowStart as Date).getTime() &&
+            a.period === k.period,
+          ) ?? null;
+        }
+        return row ? withAlertIncludes(row, include, supplies) : null;
+      },
+      findMany: async ({ where, orderBy, take, skip }: { where: Row; orderBy?: Row; take?: number; skip?: number }) => {
+        let list = alerts.filter(a =>
+          a.supplyId === where.supplyId &&
+          (where.status === undefined || a.status === where.status) &&
+          (where.type === undefined || a.type === where.type),
+        );
+        if (orderBy && (orderBy as Row).windowStart === 'desc') {
+          list = [...list].sort((a, b) => (b.windowStart as Date).getTime() - (a.windowStart as Date).getTime());
+        }
+        if (skip) list = list.slice(skip);
+        if (take !== undefined) list = list.slice(0, take);
+        return list;
+      },
+      create: async ({ data }: { data: Row }) => {
+        const row: Row = {
+          id: randomUUID(), status: 'NEW', detectedAt: new Date(),
+          acknowledgedBy: null, acknowledgedAt: null, expectedValue: null, deviation: null, ...data,
+        };
+        alerts.push(row);
+        return row;
+      },
+      update: async ({ where, data }: { where: Row; data: Row }) => {
+        const row = alerts.find(a => a.id === where.id);
+        if (!row) throw new Error('alert no encontrada');
+        Object.assign(row, data);
+        return row;
+      },
+    },
+
     tollRate: { findMany: async ({ where }: { where: Row }) => tollRates.filter(r => r.tariff === where.tariff) },
     chargeRate: { findMany: async ({ where }: { where: Row }) => chargeRates.filter(r => r.tariff === where.tariff) },
     iEERate: { findFirst: async () => ieeRates[0] ?? null },
@@ -307,5 +380,12 @@ function withOptIncludes(row: Row, include: Row | undefined, supplies: Row[]): R
   const out: Row = { ...row };
   if (include?.supply) out.supply = supplies.find(s => s.id === row.supplyId) ?? null;
   if (include?.periods) out.periods = (row.periods as Row[]) ?? [];
+  return out;
+}
+
+// ─── includes de alertas (M03) ────────────────────────────────────────────────
+function withAlertIncludes(row: Row, include: Row | undefined, supplies: Row[]): Row {
+  const out: Row = { ...row };
+  if (include?.supply) out.supply = supplies.find(s => s.id === row.supplyId) ?? null;
   return out;
 }

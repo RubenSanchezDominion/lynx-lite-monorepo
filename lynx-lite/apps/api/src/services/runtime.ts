@@ -1,5 +1,6 @@
 import type { PreInvoiceDataSource } from './preInvoiceData.js';
 import type { PowerOptimizationDataSource } from './powerOptimizationData.js';
+import type { AlertDataSource } from './alertData.js';
 import type { EnsureData } from './ingestion.js';
 
 // Holder del DataSource de pre-factura. El bootstrap (src/index.ts) lo inicializa
@@ -32,6 +33,21 @@ export function getOptimizationDataSource(): PowerOptimizationDataSource {
     );
   }
   return optimizationDataSource;
+}
+
+// Holder del DataSource de alertas (M03). Mismo patrón: el bootstrap lo inicializa con la
+// implementación InfluxDB; el demo con un generador determinista; los tests con un mock.
+let alertDataSource: AlertDataSource | null = null;
+
+export function setAlertDataSource(ds: AlertDataSource): void {
+  alertDataSource = ds;
+}
+
+export function getAlertDataSource(): AlertDataSource {
+  if (!alertDataSource) {
+    throw new Error('AlertDataSource no inicializado. Llama a setAlertDataSource() en el arranque.');
+  }
+  return alertDataSource;
 }
 
 // Holder de la ingesta on-demand (opcional). Si no se inicializa, el servicio de

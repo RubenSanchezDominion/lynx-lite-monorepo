@@ -47,6 +47,33 @@ enum RateType {
   ENERGY
 }
 
+// ─── M03 — Alertas y detección de anomalías ──────────────────────────────────
+
+enum AlertSensitivity {
+  CONSERVADOR // z-threshold 3.5
+  EQUILIBRADO // z-threshold 3.0 (default)
+  AGRESIVO // z-threshold 2.5
+}
+
+enum AlertType {
+  ZSCORE
+  PHANTOM
+  LIMIT
+  ESTIMATED
+}
+
+enum AlertStatus {
+  NEW
+  ACKNOWLEDGED
+  DISMISSED
+}
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
 // ─── Usuarios ──────────────────────────────────────────────────────────────────
 
 model User {
@@ -92,6 +119,8 @@ model Supply {
   contracts      Contract[]
   preInvoices    PreInvoice[]
   powerOptimizations PowerOptimization[]
+  alerts         Alert[]
+  alertConfig    AlertConfig?
   users          User[]
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
@@ -265,4 +294,43 @@ model PowerOptimizationPeriod {
   marginPct      Float // (optimalPower − currentPower) / currentPower × 100 (informativo)
 
   @@unique([optimizationId, period])
+}
+
+// ─── Alertas y detección de anomalías (M03) ───────────────────────────────────
+
+// Configuración de alertas por suministro (SPECS §5.2). 1 config por Supply.
+model AlertConfig {
+  id                  String           @id @default(uuid())
+  supplyId            String           @unique
+  supply              Supply           @relation(fields: [supplyId], references: [id])
+  enabled             Boolean          @default(true)
+  sensitivity         AlertSensitivity @default(EQUILIBRADO)
+  enabledTypes        String // CSV de AlertType activos, p.ej. "ZSCORE,PHANTOM,LIMIT,ESTIMATED"
+  limitThresholdPct   Float            @default(0.95) // fracción de la potencia contratada (LIMIT)
+  phantomThresholdKwh Float            @default(0.0) // consumo mínimo en franja inactiva (PHANTOM)
+  inactivityWindows   Json // [{ "days":[0..6], "from":"HH:MM", "to":"HH:MM" }] hora local Madrid
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+}
+
+// Alerta detectada y persistida (SPECS §5.2). El job es idempotente por la clave única.
+model Alert {
+  id             String        @id @default(uuid())
+  supplyId       String
+  supply         Supply        @relation(fields: [supplyId], references: [id])
+  type           AlertType
+  severity       AlertSeverity
+  status         AlertStatus   @default(NEW)
+  period         Int // 1–6 (período del intervalo); 0 si no aplica
+  windowStart    DateTime // inicio del intervalo anómalo (UTC)
+  windowEnd      DateTime // fin del intervalo anómalo (UTC)
+  observedValue  Float // valor observado (kWh, kW o z-score según tipo)
+  expectedValue  Float? // referencia esperada (media del slot, umbral, Pc); null si no aplica
+  deviation      Float? // desvío (z-score o ratio sobre el umbral); null si no aplica
+  message        String // descripción legible generada por el engine
+  detectedAt     DateTime      @default(now())
+  acknowledgedBy String? // userId que la gestionó
+  acknowledgedAt DateTime?
+
+  @@unique([supplyId, type, windowStart, period]) // idempotencia del job (no re-crea la misma)
 }

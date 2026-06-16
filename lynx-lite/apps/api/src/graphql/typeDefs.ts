@@ -160,6 +160,64 @@ export const typeDefs = /* GraphQL */ `
     analysisTo: String!
   }
 
+  # ─── Alertas y detección de anomalías (M03) ───────────────────────────────────
+  type Alert {
+    id: ID!
+    supplyId: String!
+    type: String! # "ZSCORE" | "PHANTOM" | "LIMIT" | "ESTIMATED"
+    severity: String! # "INFO" | "WARNING" | "CRITICAL"
+    status: String! # "NEW" | "ACKNOWLEDGED" | "DISMISSED"
+    period: Int!
+    windowStart: String! # ISO 8601 UTC
+    windowEnd: String!
+    observedValue: Float!
+    expectedValue: Float
+    deviation: Float
+    message: String!
+    detectedAt: String!
+    acknowledgedBy: String
+    acknowledgedAt: String
+  }
+
+  type InactivityWindow {
+    days: [Int!]!
+    from: String!
+    to: String!
+  }
+
+  type AlertConfig {
+    id: ID!
+    supplyId: String!
+    enabled: Boolean!
+    sensitivity: String! # "CONSERVADOR" | "EQUILIBRADO" | "AGRESIVO"
+    enabledTypes: [String!]!
+    limitThresholdPct: Float!
+    phantomThresholdKwh: Float!
+    inactivityWindows: [InactivityWindow!]!
+    updatedAt: String!
+  }
+
+  input InactivityWindowInput {
+    days: [Int!]!
+    from: String!
+    to: String!
+  }
+
+  input AlertConfigInput {
+    cups: String!
+    enabled: Boolean
+    sensitivity: String
+    enabledTypes: [String!]
+    limitThresholdPct: Float
+    phantomThresholdKwh: Float
+    inactivityWindows: [InactivityWindowInput!]
+  }
+
+  input EvaluateAlertsInput {
+    cups: String!
+    day: String # "YYYY-MM-DD"; default = último día cerrado (D-2)
+  }
+
   # ─── Operaciones ────────────────────────────────────────────────────────────
   type Query {
     me: User!
@@ -174,6 +232,10 @@ export const typeDefs = /* GraphQL */ `
     calculatePowerOptimization(input: PowerOptimizationInput!): PowerOptimization!
     powerOptimization(id: ID!): PowerOptimization
     powerOptimizations(supplyId: String!, limit: Int, offset: Int): [PowerOptimization!]!
+
+    alerts(supplyId: String!, status: String, type: String, limit: Int, offset: Int): [Alert!]!
+    alert(id: ID!): Alert
+    alertConfig(supplyId: String!): AlertConfig
   }
 
   type Mutation {
@@ -193,5 +255,10 @@ export const typeDefs = /* GraphQL */ `
 
     savePowerOptimization(input: PowerOptimizationInput!): PowerOptimization!
     deletePowerOptimization(id: ID!): Boolean!
+
+    saveAlertConfig(input: AlertConfigInput!): AlertConfig!
+    evaluateAlerts(input: EvaluateAlertsInput!): [Alert!]!
+    acknowledgeAlert(id: ID!): Alert!
+    dismissAlert(id: ID!): Alert!
   }
 `;
