@@ -90,3 +90,36 @@ export async function loadRegulatoryRates(
     reactiveRates: tier1 && tier2 ? { tier1Eur: tier1.eur, tier2Eur: tier2.eur } : null,
   };
 }
+
+// Solo peaje + cargo de ENERGÍA por período (para componer el €/kWh de M04, idéntico al término
+// de energía de M01). No carga IEE/IVA/alquiler/potencia: M04 no los necesita. Lanza
+// REGULATORY_DATA_MISSING si falta algún período de energía.
+export async function loadEnergyUnitRates(
+  prisma: PrismaClient,
+  tariff: Tariff,
+  from: Date,
+  to: Date,
+): Promise<{ tollEnergy: Record<string, number>; chargeEnergy: Record<string, number> }> {
+  const dateFilter = {
+    validFrom: { lte: from },
+    OR: [{ validTo: null }, { validTo: { gte: to } }],
+  };
+
+  const [tolls, charges] = await Promise.all([
+    prisma.tollRate.findMany({ where: { tariff, ...dateFilter } }),
+    prisma.chargeRate.findMany({ where: { tariff, ...dateFilter } }),
+  ]);
+
+  const ePeriods = energyPeriods(tariff);
+  const pick = (rows: RateRow[]): Record<string, number> => {
+    const out: Record<string, number> = {};
+    for (const p of ePeriods) {
+      const row = rows.find(r => r.rateType === 'ENERGY' && r.period === p);
+      if (!row) throw gqlError('REGULATORY_DATA_MISSING', `Falta ENERGY P${p} (${tariff})`);
+      out[`P${p}`] = row.eur;
+    }
+    return out;
+  };
+
+  return { tollEnergy: pick(tolls), chargeEnergy: pick(charges) };
+}

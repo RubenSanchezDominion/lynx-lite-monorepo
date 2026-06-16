@@ -114,6 +114,34 @@ export async function createInMemoryStore() {
     inactivityWindows: defaultWindows, createdAt: now, updatedAt: now,
   }));
 
+  // M04 — KPI: un fichero de producción sembrado para supply-30td (3 días, 2 turnos/día) con el
+  // turno de mañana del día 06 a baja producción → su día sale como outlier en granularidad DAY.
+  const kpiUploadId = 'upload-demo-30td';
+  const shiftRow = (day: string, shift: string, startH: number, endH: number, units: number): Row => ({
+    id: randomUUID(),
+    uploadId: kpiUploadId,
+    startTs: new Date(`2026-05-${day}T${String(startH).padStart(2, '0')}:00:00.000Z`),
+    endTs: new Date(`2026-05-${day}T${String(endH).padStart(2, '0')}:00:00.000Z`),
+    units,
+    shift,
+    line: null,
+    batch: null,
+  });
+  const productionRows: Row[] = [
+    shiftRow('04', 'M', 6, 14, 2000), shiftRow('04', 'T', 14, 22, 1800),
+    shiftRow('05', 'M', 6, 14, 2000), shiftRow('05', 'T', 14, 22, 1800),
+    shiftRow('06', 'M', 6, 14, 800), shiftRow('06', 'T', 14, 22, 1800), // día 06 atípico (baja producción)
+  ];
+  const productionUploads: Row[] = [
+    {
+      id: kpiUploadId, supplyId: 'supply-30td', fileName: 'produccion-demo.csv', format: 'CSV',
+      rowCount: productionRows.length, rangeStart: new Date('2026-05-04T06:00:00.000Z'),
+      rangeEnd: new Date('2026-05-06T22:00:00.000Z'), uploadedAt: now, uploadedBy: null,
+    },
+  ];
+  const kpiReports: Row[] = [];
+  const kpiReportLines: Row[] = [];
+
   // Helpers de delegate.
   const findUniqueBy = (rows: Row[], where: Row): Row | null => {
     const keys = Object.keys(where);
@@ -335,6 +363,97 @@ export async function createInMemoryStore() {
         if (!row) throw new Error('alert no encontrada');
         Object.assign(row, data);
         return row;
+      },
+    },
+
+    productionUpload: {
+      findUnique: async ({ where, include }: { where: Row; include?: Row }) => {
+        const row = where.id ? productionUploads.find(u => u.id === where.id) ?? null : null;
+        if (!row) return null;
+        const out: Row = { ...row };
+        if (include?.rows) out.rows = productionRows.filter(r => r.uploadId === row.id);
+        if (include?.supply) out.supply = supplies.find(s => s.id === row.supplyId) ?? null;
+        return out;
+      },
+      findMany: async ({ where, orderBy }: { where: Row; orderBy?: Row }) => {
+        let list = productionUploads.filter(u => u.supplyId === where.supplyId);
+        if (orderBy && (orderBy as Row).uploadedAt === 'desc') {
+          list = [...list].sort((a, b) => (b.uploadedAt as Date).getTime() - (a.uploadedAt as Date).getTime());
+        }
+        return list;
+      },
+      create: async ({ data, include }: { data: Row; include?: Row }) => {
+        const rowsSpec = (data.rows as { create?: Row[] } | undefined)?.create ?? [];
+        const { rows, ...rest } = data;
+        void rows;
+        const id = randomUUID();
+        const row: Row = { id, uploadedAt: new Date(), uploadedBy: null, ...rest };
+        productionUploads.push(row);
+        const created = rowsSpec.map(r => ({ id: randomUUID(), uploadId: id, ...r }));
+        productionRows.push(...created);
+        const out: Row = { ...row };
+        if (include?.rows) out.rows = created;
+        return out;
+      },
+    },
+
+    kpiReport: {
+      findUnique: async ({ where, include }: { where: Row; include?: Row }) => {
+        let row: Row | null = null;
+        if (where.id) row = kpiReports.find(r => r.id === where.id) ?? null;
+        else if (where.uploadId_granularity) {
+          const k = where.uploadId_granularity as Row;
+          row = kpiReports.find(r => r.uploadId === k.uploadId && r.granularity === k.granularity) ?? null;
+        }
+        if (!row) return null;
+        const out: Row = { ...row };
+        if (include?.lines) out.lines = kpiReportLines.filter(l => l.reportId === row!.id);
+        if (include?.supply) out.supply = supplies.find(s => s.id === row!.supplyId) ?? null;
+        return out;
+      },
+      findMany: async ({ where, orderBy, include }: { where: Row; orderBy?: Row; include?: Row }) => {
+        let list = kpiReports.filter(r => r.supplyId === where.supplyId);
+        if (orderBy && (orderBy as Row).computedAt === 'desc') {
+          list = [...list].sort((a, b) => (b.computedAt as Date).getTime() - (a.computedAt as Date).getTime());
+        }
+        return list.map(r => (include?.lines ? { ...r, lines: kpiReportLines.filter(l => l.reportId === r.id) } : r));
+      },
+      create: async ({ data, include }: { data: Row; include?: Row }) => {
+        const linesSpec = (data.lines as { create?: Row[] } | undefined)?.create ?? [];
+        const { lines, ...rest } = data;
+        void lines;
+        const id = randomUUID();
+        const row: Row = { id, computedAt: new Date(), outlierPct: 0.2, hasGaps: false, ...rest };
+        kpiReports.push(row);
+        const created = linesSpec.map(l => ({ id: randomUUID(), reportId: id, ...l }));
+        kpiReportLines.push(...created);
+        const out: Row = { ...row };
+        if (include?.lines) out.lines = created;
+        return out;
+      },
+      update: async ({ where, data, include }: { where: Row; data: Row; include?: Row }) => {
+        const row = kpiReports.find(r => r.id === where.id);
+        if (!row) throw new Error('kpiReport no encontrada');
+        const linesSpec = (data.lines as { create?: Row[] } | undefined)?.create;
+        const { lines, ...rest } = data;
+        void lines;
+        Object.assign(row, rest);
+        if (linesSpec) {
+          const created = linesSpec.map(l => ({ id: randomUUID(), reportId: row.id, ...l }));
+          kpiReportLines.push(...created);
+        }
+        const out: Row = { ...row };
+        if (include?.lines) out.lines = kpiReportLines.filter(l => l.reportId === row.id);
+        return out;
+      },
+    },
+
+    kpiReportLine: {
+      deleteMany: async ({ where }: { where: Row }) => {
+        for (let i = kpiReportLines.length - 1; i >= 0; i--) {
+          if (kpiReportLines[i].reportId === where.reportId) kpiReportLines.splice(i, 1);
+        }
+        return { count: 0 };
       },
     },
 

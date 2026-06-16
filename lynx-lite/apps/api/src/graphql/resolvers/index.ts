@@ -3,6 +3,7 @@ import { supplyResolvers } from './supply.js';
 import { preInvoiceResolvers } from './preInvoice.js';
 import { powerOptimizationResolvers } from './powerOptimization.js';
 import { alertResolvers } from './alert.js';
+import { kpiResolvers } from './kpi.js';
 
 export const resolvers = {
   Query: {
@@ -11,6 +12,7 @@ export const resolvers = {
     ...preInvoiceResolvers.Query,
     ...powerOptimizationResolvers.Query,
     ...alertResolvers.Query,
+    ...kpiResolvers.Query,
   },
   Mutation: {
     ...authResolvers.Mutation,
@@ -18,5 +20,6 @@ export const resolvers = {
     ...preInvoiceResolvers.Mutation,
     ...powerOptimizationResolvers.Mutation,
     ...alertResolvers.Mutation,
+    ...kpiResolvers.Mutation,
   },
 };

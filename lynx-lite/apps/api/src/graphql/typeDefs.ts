@@ -218,6 +218,68 @@ export const typeDefs = /* GraphQL */ `
     day: String # "YYYY-MM-DD"; default = último día cerrado (D-2)
   }
 
+  # ─── KPI de coste por unidad producida (M04) ──────────────────────────────────
+  type ProductionUpload {
+    id: ID!
+    supplyId: String!
+    fileName: String!
+    format: String! # "CSV" | "XLSX"
+    rowCount: Int!
+    rangeStart: String! # ISO 8601 UTC
+    rangeEnd: String!
+    uploadedAt: String!
+  }
+
+  type KpiReportLine {
+    bucketKey: String!
+    bucketStart: String! # ISO 8601 UTC
+    units: Float!
+    kwh: Float!
+    costEur: Float!
+    eurPerUnit: Float!
+    isOutlier: Boolean!
+  }
+
+  type KpiReport {
+    id: ID!
+    supplyId: String!
+    uploadId: String!
+    granularity: String! # "SHIFT" | "DAY" | "WEEK" | "MONTH"
+    rangeStart: String!
+    rangeEnd: String!
+    totalUnits: Float!
+    totalKwh: Float!
+    totalCostEur: Float!
+    avgEurPerUnit: Float!
+    baselineEurPerUnit: Float!
+    outlierPct: Float!
+    hasGaps: Boolean!
+    computedAt: String!
+    lines: [KpiReportLine!]! # ordenadas por bucketStart (evolución)
+  }
+
+  input ProductionRowInput {
+    startTs: String! # ISO 8601 (parseado en el front a UTC)
+    endTs: String!
+    units: Float!
+    shift: String # "M" | "T" | "N"
+    line: String
+    batch: String
+  }
+
+  input SubmitProductionInput {
+    cups: String!
+    fileName: String!
+    format: String! # "CSV" | "XLSX"
+    rows: [ProductionRowInput!]!
+  }
+
+  input ComputeKpiInput {
+    uploadId: String!
+    granularity: String # default "DAY"
+    outlierPct: Float # default 0.20
+  }
+
   # ─── Operaciones ────────────────────────────────────────────────────────────
   type Query {
     me: User!
@@ -236,6 +298,10 @@ export const typeDefs = /* GraphQL */ `
     alerts(supplyId: String!, status: String, type: String, limit: Int, offset: Int): [Alert!]!
     alert(id: ID!): Alert
     alertConfig(supplyId: String!): AlertConfig
+
+    productionUploads(supplyId: String!): [ProductionUpload!]!
+    kpiReport(id: ID!): KpiReport
+    kpiReports(supplyId: String!): [KpiReport!]!
   }
 
   type Mutation {
@@ -260,5 +326,8 @@ export const typeDefs = /* GraphQL */ `
     evaluateAlerts(input: EvaluateAlertsInput!): [Alert!]!
     acknowledgeAlert(id: ID!): Alert!
     dismissAlert(id: ID!): Alert!
+
+    submitProductionData(input: SubmitProductionInput!): ProductionUpload!
+    computeKpi(input: ComputeKpiInput!): KpiReport!
   }
 `;

@@ -47,6 +47,26 @@ enum RateType {
   ENERGY
 }
 
+// ─── M04 — KPI de coste energético por unidad producida ───────────────────────
+
+enum ProductionFileFormat {
+  CSV
+  XLSX
+}
+
+enum ProductionShift {
+  M // mañana
+  T // tarde
+  N // noche
+}
+
+enum KpiGranularity {
+  SHIFT
+  DAY
+  WEEK
+  MONTH
+}
+
 // ─── M03 — Alertas y detección de anomalías ──────────────────────────────────
 
 enum AlertSensitivity {
@@ -121,6 +141,8 @@ model Supply {
   powerOptimizations PowerOptimization[]
   alerts         Alert[]
   alertConfig    AlertConfig?
+  productionUploads ProductionUpload[]
+  kpiReports     KpiReport[]
   users          User[]
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
@@ -333,4 +355,70 @@ model Alert {
   acknowledgedAt DateTime?
 
   @@unique([supplyId, type, windowStart, period]) // idempotencia del job (no re-crea la misma)
+}
+
+// ─── M04 — KPI de coste por unidad producida (SPECS §6.2) ──────────────────────
+
+// Fichero de producción subido por el cliente (parseado en el front; aquí se guardan las filas).
+model ProductionUpload {
+  id         String               @id @default(uuid())
+  supplyId   String
+  supply     Supply               @relation(fields: [supplyId], references: [id])
+  fileName   String
+  format     ProductionFileFormat
+  rowCount   Int
+  rangeStart DateTime // min(startTs) de las filas (UTC)
+  rangeEnd   DateTime // max(endTs) de las filas (UTC)
+  uploadedAt DateTime             @default(now())
+  uploadedBy String? // userId que la subió
+  rows       ProductionRow[]
+  reports    KpiReport[]
+}
+
+model ProductionRow {
+  id       String           @id @default(uuid())
+  uploadId String
+  upload   ProductionUpload @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+  startTs  DateTime // inicio del tramo (UTC)
+  endTs    DateTime // fin del tramo (UTC); endTs > startTs
+  units    Float // unidades producidas en el tramo; > 0
+  shift    ProductionShift?
+  line     String? // metadato (caveat §6.0: CUPS único no desagrega por línea si hay solape)
+  batch    String? // metadato (lote)
+}
+
+// Resultado del cálculo del KPI. Idempotente por (uploadId, granularity).
+model KpiReport {
+  id                 String           @id @default(uuid())
+  supplyId           String
+  supply             Supply           @relation(fields: [supplyId], references: [id])
+  uploadId           String
+  upload             ProductionUpload @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+  granularity        KpiGranularity
+  rangeStart         DateTime
+  rangeEnd           DateTime
+  totalUnits         Float
+  totalKwh           Float
+  totalCostEur       Float
+  avgEurPerUnit      Float // totalCostEur / totalUnits
+  baselineEurPerUnit Float // mediana de €/ud de los buckets (referencia de outliers)
+  outlierPct         Float            @default(0.20)
+  hasGaps            Boolean          @default(false) // algún tramo con consumo imputado sobre gap
+  computedAt         DateTime         @default(now())
+  lines              KpiReportLine[]
+
+  @@unique([uploadId, granularity]) // idempotencia del recálculo
+}
+
+model KpiReportLine {
+  id          String    @id @default(uuid())
+  reportId    String
+  report      KpiReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  bucketKey   String // "2026-06-01#M" | "2026-06-01" | "2026-W23" | "2026-06" (calendario local Madrid)
+  bucketStart DateTime // inicio del bucket (para ordenar la evolución temporal)
+  units       Float
+  kwh         Float
+  costEur     Float
+  eurPerUnit  Float // costEur / units
+  isOutlier   Boolean   @default(false)
 }

@@ -21,7 +21,12 @@ export type ErrorCode =
   | 'OPTIMIZATION_NOT_FOUND'
   // M03
   | 'ALERT_NOT_FOUND'
-  | 'ALERT_CONFIG_NOT_FOUND';
+  | 'ALERT_CONFIG_NOT_FOUND'
+  // M04
+  | 'KPI_INVALID_ROW'
+  | 'KPI_OVERLAPPING_INTERVALS'
+  | 'KPI_NO_PRODUCTION_DATA'
+  | 'KPI_UPLOAD_NOT_FOUND';
 
 export function gqlError(code: ErrorCode, message?: string): GraphQLError {
   return new GraphQLError(message ?? code, { extensions: { code } });

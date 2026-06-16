@@ -16,6 +16,7 @@ import { AuthService } from '../services/auth.service';
         <a routerLink="/prefactura" routerLinkActive="active">Pre-factura</a>
         <a routerLink="/optimizacion" routerLinkActive="active">Optimización</a>
         <a routerLink="/alertas" routerLinkActive="active">Alertas</a>
+        <a routerLink="/kpi" routerLinkActive="active">KPI</a>
       </nav>
       <span class="spacer"></span>
       <span class="user" *ngIf="auth.user as u">{{ u.email }} · {{ u.role }}</span>

@@ -13,7 +13,8 @@
 3. [M01 — Pre-factura automática](#3-m01--pre-factura-automática)
 4. [M02 — Optimización de potencia contratada](#4-m02--optimización-de-potencia-contratada)
 5. [M03 — Alertas y detección de anomalías](#5-m03--alertas-y-detección-de-anomalías)
-6. [Convenciones de test](#6-convenciones-de-test)
+6. [M04 — KPI de coste energético por unidad producida](#6-m04--kpi-de-coste-energético-por-unidad-producida)
+7. [Convenciones de test](#7-convenciones-de-test)
 
 ---
 
@@ -1702,7 +1703,7 @@ Estado al inicio de M02 (tras la Fase 0, commit de corrección de excesos de M01
   `prisma/migrations`). Los modelos nuevos de M02 (`PowerOptimization`, `PowerOptimizationPeriod`)
   y la relación inversa en `Supply` se añaden al `schema.prisma` y se aplican con `prisma migrate dev`
   cuando exista BD; en tests se usa el cliente mockeado.
-- **Patrón de tests**: Vitest; mock de Prisma con `vi.hoisted` (no `vitest-mock-extended`, ver §6.3).
+- **Patrón de tests**: Vitest; mock de Prisma con `vi.hoisted` (no `vitest-mock-extended`, ver §7.3).
 
 ### 4.1 Fuentes de datos
 
@@ -2097,7 +2098,7 @@ extend type Mutation {
 ### 4.6 Casos de test — contrato de implementación
 
 > Los tests del `optimization-engine` son unitarios (sin I/O). Los del resolver son de
-> integración con Prisma e InfluxDB mockeados. Nomenclatura `TC-OPT-NNN` (§6.1).
+> integración con Prisma e InfluxDB mockeados. Nomenclatura `TC-OPT-NNN` (§7.1).
 
 #### TC-OPT-001 — Percentil 99 + uplift + monotonía (3.0TD, hourly) — Unit
 
@@ -2317,7 +2318,7 @@ persiste, se acumula y el usuario gestiona (marca como vista o descarta). La det
 - **Data source de serie horaria** (≥ 13 semanas): `AlertDataSource` inyectable (espejo de
   `PreInvoiceDataSource`/`PowerOptimizationDataSource`), real = Flux contra InfluxDB, demo =
   generador determinista. Se inyecta vía `runtime.ts` (`setAlertDataSource`/`getAlertDataSource`).
-- **Patrón de tests**: Vitest; mock de Prisma con `vi.hoisted` (no `vitest-mock-extended`, ver §6.3).
+- **Patrón de tests**: Vitest; mock de Prisma con `vi.hoisted` (no `vitest-mock-extended`, ver §7.3).
 
 ### 5.1 Fuentes de datos
 
@@ -2646,7 +2647,7 @@ extend type Mutation {
 ### 5.6 Casos de test — contrato de implementación
 
 > Los tests del `alerts-engine` son unitarios (sin I/O). Los del resolver y el job son de integración
-> con Prisma e InfluxDB mockeados. Nomenclatura `TC-ALT-NNN` (§6.1).
+> con Prisma e InfluxDB mockeados. Nomenclatura `TC-ALT-NNN` (§7.1).
 
 #### TC-ALT-001 — ZSCORE dispara con z ≥ umbral (equilibrado) — Unit
 
@@ -2783,11 +2784,560 @@ No hay puntos `gap="false"` del día evaluado → `NO_CONSUMPTION_DATA`.
 
 ---
 
-## 6. Convenciones de test
+## 6. M04 — KPI de coste energético por unidad producida
+
+Cruza la **curva de consumo** ya ingestada (`hourly_consumption`) con un **fichero de producción** que
+el cliente sube (tramos de tiempo con unidades fabricadas) para calcular el **coste energético por
+unidad producida (€/ud)**, su evolución temporal y los tramos atípicos. Es el **diferenciador** del
+producto: ningún competidor "lite" cruza energía con producción real. Como M01/M02, el cálculo puro
+vive en un módulo nuevo `packages/kpi-engine` (sin I/O); a diferencia de M03, **no hay job ni estado de
+ciclo de vida**: el cliente sube un fichero y dispara el cálculo bajo demanda.
+
+### 6.0 Decisiones de diseño (premisas de este módulo)
+
+> **Entrada por fichero parseado en el front — sin infraestructura de upload en el servidor.** El
+> navegador lee y parsea el fichero (**CSV** nativo, **Excel `.xlsx`** con SheetJS) y envía las filas
+> ya estructuradas como **array JSON** en una mutation GraphQL normal (`submitProductionData`). El
+> servidor **no** añade `multer`, `graphql-upload`, `multipart` ni `apollo-upload-client`: mantiene el
+> patrón HTTP-plano actual. La librería `xlsx` vive **solo en el front**. El backend **revalida
+> siempre** las filas (no se fía del cliente). *(Trade-off asumido: el fichero binario original no se
+> persiste; se guardan las filas parseadas. Apto para ficheros pequeños —producción mensual/horaria,
+> cientos de filas—. Si en el futuro se requieren ficheros grandes o conservar el original, se
+> reconsidera un upload al backend.)*
+
+> **Modelo de coste — coste variable de energía.** El € atribuido a cada kWh consumido es
+> `PVPC_horario + peaje_energía_período + cargo_energía_período`, **idéntico al término de energía de
+> M01** (§3.4) y a sus maestros (`TollRate`/`ChargeRate` de tipo `ENERGY`, measurement `pvpc_price`).
+> Es el **coste marginal de la energía**: **excluye** término de potencia, alquiler de contador, IEE e
+> IVA (costes fijos que no dependen de producir más o menos unidades). La composición del precio se
+> hace en el servicio (reutilizando la lógica de M01) y se pasa al engine ya compuesta (`eurPerKwh`),
+> de modo que el engine no conoce tarifas.
+
+> **Sin estado ni job (a diferencia de M03).** El KPI no es un objeto con ciclo de vida; es el
+> resultado de un cálculo. Se persiste un `ProductionUpload` (las filas subidas) y un `KpiReport` (el
+> resultado, para histórico y evolución), pero el cálculo se dispara con una mutation (`computeKpi`),
+> no con un cron. Recálculo idempotente por `(uploadId, granularity)`.
+
+1. **Imputación proporcional consumo→tramo.** Un tramo de producción (p. ej. un turno 06:00–14:00)
+   abarca varias horas de `hourly_consumption`. Se suma el `kwh` de las horas que **solapan** el tramo;
+   si un borde cae a mitad de hora, esa hora pondera por `segundosSolapados / duraciónDelBucket`. La
+   granularidad mínima fiable es **horaria**: si el tramo es más corto que una hora se imputa la
+   fracción proporcional, asumiendo consumo uniforme dentro de la hora (limitación documentada).
+
+2. **Detección de outliers ±20 % sobre baseline.** La baseline es la **mediana** de €/ud de los buckets
+   agregados (robusta a los propios atípicos). Un bucket es `isOutlier` si
+   `|€/ud − baseline| > outlierPct × baseline` (`outlierPct` default **0.20**).
+
+3. **Caveat crítico — KPI por línea/lote con un único CUPS.** DATADIS entrega el consumo **total del
+   punto de suministro (CUPS)**, no separable por línea de producción. Por tanto el coste **no puede
+   desagregarse por `linea`/`lote`** cuando hay producción **paralela** (varias líneas consumiendo a la
+   vez del mismo CUPS). En consecuencia: la **granularidad de agregación es temporal** (turno/día/
+   semana/mes); `linea` y `lote` se conservan como **metadatos** del tramo pero **no** son ejes de
+   agregación de €/ud. Si **cualquier** par de tramos **se solapa en el tiempo**, el fichero se
+   **rechaza** con `KPI_OVERLAPPING_INTERVALS` (no se acepta con aviso): imputar el mismo consumo a dos
+   tramos solapados duplicaría kWh y coste y rompería los totales, y con un CUPS único no hay forma
+   correcta de repartir el consumo entre líneas paralelas. La validación de solape vive en
+   `submitProductionData` (§6.5).
+
+### 6.0bis Prerrequisitos de implementación
+
+- **Nuevo paquete `packages/kpi-engine`**: función pura `computeKpi(input)` + utilidades
+  (`overlapMs`, `median`). Mismo patrón que `alerts-engine`/`optimization-engine`: sin Prisma, sin
+  InfluxDB, 100 % testeable con datos sintéticos. **No conoce tarifas ni husos horarios**: recibe el
+  `eurPerKwh` ya compuesto y, en cada tramo, la hora local Madrid ya resuelta (`localStart`); la
+  conversión de zona y la composición del precio las hace el servicio (`kpiService`).
+- **Composición del precio en el servicio** reutilizando M01: `eurPerKwh_h = pvpc_h + tollEnergy[p] +
+  chargeEnergy[p]` por período (la misma suma que `engine.ts` de `pricing-engine` en el término de
+  energía). No se duplica el motor de factura; solo se reutiliza esa composición.
+- **Nuevos modelos Prisma** `ProductionUpload`, `ProductionRow`, `KpiReport`, `KpiReportLine` +
+  relaciones inversas en `Supply`. Como en M01/M02/M03, **no hay migración aplicada** (el repo nunca ha
+  corrido contra Postgres real); se añaden a `schema.prisma`. En tests, cliente mockeado.
+- **Data source de curva + precio** (`KpiDataSource` inyectable, espejo de los de M01–M03): real = Flux
+  contra InfluxDB (`hourly_consumption` + `pvpc_price`) + maestros de energía desde PostgreSQL, ya
+  compuesto en `eurPerKwh`; demo = generador determinista. Se inyecta vía `runtime.ts`
+  (`setKpiDataSource`/`getKpiDataSource`).
+- **Front**: nueva dependencia `xlsx` (SheetJS) **solo** en `apps/web` (parseo de `.xlsx` en cliente).
+- **Patrón de tests**: Vitest; mock de Prisma con `vi.hoisted` (no `vitest-mock-extended`, ver §7.3).
+- **Sin worker**: M04 no añade jobs a `apps/worker`.
+
+### 6.1 Fuentes de datos
+
+| Fuente | Endpoint / origen | Dato obtenido | Uso en M04 |
+|--------|-------------------|---------------|------------|
+| **Fichero del cliente** (CSV/`.xlsx`) | Parseado en el front, enviado como filas JSON | Tramos `(inicio, fin, unidades)` + opcionales `turno`/`línea`/`lote` | Numerador (unidades) y ejes de los tramos |
+| InfluxDB | measurement `hourly_consumption` (`kwh`, `gap`) | Curva horaria del rango cubierto por la producción | Energía consumida por tramo (imputación) |
+| InfluxDB | measurement `pvpc_price` | Precio horario PVPC (€/kWh) | Componente del `eurPerKwh` |
+| PostgreSQL | `TollRate` / `ChargeRate` (tipo `ENERGY`, vigentes) | Peaje y cargo de energía por tarifa/período | Componentes del `eurPerKwh` (idéntico a M01) |
+
+> **Sin ingesta nueva**: M04 consume lo que ya carga M01 (`hourly_consumption`, `pvpc_price`). No añade
+> measurements, no llama a DATADIS/ESIOS durante el cálculo. El único dato externo nuevo es el fichero
+> de producción, que entra por GraphQL (no por ingesta).
+>
+> **Rango**: el cálculo cubre `[min(startTs), max(endTs))` de las filas subidas. Si falta curva de
+> consumo en parte del rango (huecos `gap`), esos tramos se marcan pero el cálculo no se bloquea.
+
+### 6.2 Modelos Prisma
+
+```prisma
+// ─── Producción subida por el cliente (M04) ──────────────────────────────────
+
+enum ProductionFileFormat { CSV  XLSX }
+enum ProductionShift      { M  T  N }            // mañana / tarde / noche (opcional)
+enum KpiGranularity       { SHIFT  DAY  WEEK  MONTH }
+
+model ProductionUpload {
+  id           String          @id @default(uuid())
+  supplyId     String
+  supply       Supply          @relation(fields: [supplyId], references: [id])
+  fileName     String
+  format       ProductionFileFormat
+  rowCount     Int
+  rangeStart   DateTime        // min(startTs) de las filas (UTC)
+  rangeEnd     DateTime        // max(endTs) de las filas (UTC)
+  uploadedAt   DateTime        @default(now())
+  uploadedBy   String?         // userId que la subió
+  rows         ProductionRow[]
+  reports      KpiReport[]
+}
+
+model ProductionRow {
+  id        String           @id @default(uuid())
+  uploadId  String
+  upload    ProductionUpload @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+  startTs   DateTime         // inicio del tramo (UTC)
+  endTs     DateTime         // fin del tramo (UTC); endTs > startTs
+  units     Float            // unidades producidas en el tramo; > 0
+  shift     ProductionShift?
+  line      String?          // metadato (ver caveat §6.0 punto 3)
+  batch     String?          // metadato (lote)
+}
+
+// ─── Resultado del cálculo de KPI (M04) ──────────────────────────────────────
+
+model KpiReport {
+  id                String          @id @default(uuid())
+  supplyId          String
+  supply            Supply          @relation(fields: [supplyId], references: [id])
+  uploadId          String
+  upload            ProductionUpload @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+  granularity       KpiGranularity
+  rangeStart        DateTime
+  rangeEnd          DateTime
+  totalUnits        Float
+  totalKwh          Float
+  totalCostEur      Float
+  avgEurPerUnit     Float           // totalCostEur / totalUnits
+  baselineEurPerUnit Float          // mediana de €/ud de los buckets (referencia de outliers)
+  outlierPct        Float           @default(0.20)
+  hasGaps           Boolean         @default(false) // algún tramo con consumo imputado sobre gap
+  computedAt        DateTime        @default(now())
+  lines             KpiReportLine[]
+  @@unique([uploadId, granularity])  // idempotencia del recálculo
+}
+
+model KpiReportLine {
+  id          String    @id @default(uuid())
+  reportId    String
+  report      KpiReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  bucketKey   String    // "2026-06-01#M" | "2026-06-01" | "2026-W23" | "2026-06" (calendario local Madrid)
+  bucketStart DateTime  // inicio del bucket (para ordenar la evolución temporal)
+  units       Float
+  kwh         Float
+  costEur     Float
+  eurPerUnit  Float     // costEur / units
+  isOutlier   Boolean   @default(false)
+}
+```
+
+> **Cambios en `Supply`**: añadir las relaciones inversas `productionUploads ProductionUpload[]` y
+> `kpiReports KpiReport[]`. No se modifica ningún otro modelo de M01/M02/M03.
+
+> **Portabilidad**: como en M03, las claves de bucket se guardan como texto. El recálculo del mismo
+> `(uploadId, granularity)` sustituye el `KpiReport` previo (idempotente).
+
+### 6.3 Esquema InfluxDB
+
+M04 **no define measurements nuevos**. Lee `hourly_consumption` (`kwh`, tag `gap`) y `pvpc_price`
+(§3.3). La asignación de `period` (para casar peaje/cargo de energía) y la hora local (para los buckets
+por día/turno) usan el mismo calendario tarifario de la ingesta (§3.3). El measurement `max_power`
+**no** se usa en M04.
+
+### 6.4 Algoritmo de cálculo — paso a paso
+
+El cálculo puro vive en `packages/kpi-engine` (`computeKpi`): sin I/O. El servicio carga la curva y
+compone `eurPerKwh` (vía `KpiDataSource`), valida las filas y persiste el `KpiReport`.
+
+#### Responsabilidad del servicio / data source (construcción de inputs)
+
+| Campo del input | Cómo lo construye el servicio / data source |
+|-----------------|---------------------------------------------|
+| `production[]` | filas validadas del `ProductionUpload` (`startTs`, `endTs`, `units`, `shift?`, `line?`, `batch?`) |
+| `consumption[]` | buckets `(ts, hours, kwh, eurPerKwh, gap)` de `hourly_consumption` sobre `[rangeStart, rangeEnd)`, con `eurPerKwh = pvpc_h + tollEnergy[p] + chargeEnergy[p]` (composición de M01) |
+| `granularity` | `SHIFT` \| `DAY` \| `WEEK` \| `MONTH` (parámetro de la mutation) |
+| `outlierPct` | umbral relativo de outlier (default 0.20) |
+
+> Validaciones **antes** de invocar al engine: `SUPPLY_NOT_FOUND`, `BACKFILL_*` (histórico no listo,
+> §3.5), `KPI_NO_PRODUCTION_DATA` (upload sin filas válidas), `NO_CONSUMPTION_DATA` (sin curva en el
+> rango). La validación por fila (`KPI_INVALID_ROW`, `KPI_OVERLAPPING_INTERVALS`) ocurre en
+> `submitProductionData` (ver §6.5).
+
+#### Interfaz del kpi-engine
+
+```typescript
+// ─── Input ──────────────────────────────────────────────────────────────────
+
+interface ConsumptionHour {
+  ts: string;        // ISO UTC, inicio del bucket
+  hours: number;     // duración del bucket en horas (1 | 0.25)
+  kwh: number;
+  eurPerKwh: number; // pvpc + peajeE[p] + cargoE[p], ya compuesto (idéntico a M01)
+  gap: boolean;      // imputado/estimado (no facturable) → marca de calidad
+}
+
+interface ProductionInterval {
+  startTs: string; endTs: string;   // ISO UTC, endTs > startTs
+  localStart: string;               // "YYYY-MM-DDTHH:mm:ss" hora local Madrid (resuelta por el servicio)
+  units: number;                    // > 0
+  shift?: 'M'|'T'|'N'; line?: string; batch?: string;
+}
+
+interface KpiInput {
+  production:  ProductionInterval[];
+  consumption: ConsumptionHour[];    // ordenado por ts, cubre el rango
+  granularity: 'SHIFT'|'DAY'|'WEEK'|'MONTH';
+  outlierPct:  number;               // default 0.20
+}
+
+// ─── Output ─────────────────────────────────────────────────────────────────
+
+interface KpiIntervalResult {        // un resultado por tramo de producción
+  startTs: string; endTs: string; units: number;
+  shift?: 'M'|'T'|'N'; line?: string; batch?: string;
+  kwh: number; costEur: number; eurPerUnit: number;
+  hasGap: boolean;                   // algún bucket imputado con gap=true
+}
+
+interface KpiBucket {                // agregado por granularidad temporal
+  key: string; bucketStart: string;
+  units: number; kwh: number; costEur: number; eurPerUnit: number;
+  isOutlier: boolean;
+}
+
+interface KpiResult {
+  intervals: KpiIntervalResult[];
+  buckets:   KpiBucket[];            // ordenados por bucketStart (evolución temporal)
+  baselineEurPerUnit: number;        // mediana de buckets[].eurPerUnit
+  totalUnits: number; totalKwh: number; totalCostEur: number; avgEurPerUnit: number;
+  hasGaps: boolean;
+}
+
+function computeKpi(input: KpiInput): KpiResult;
+```
+
+#### Paso 1 — Imputación de consumo a cada tramo
+
+Para cada `ProductionInterval` `[startTs, endTs)`, recorrer los `ConsumptionHour` que solapan y acumular:
+
+```
+para cada bucket h con [h.start, h.end) ∩ [startTs, endTs) = [a, b), b > a:
+  frac        = (b − a) / (h.end − h.start)      // fracción del bucket dentro del tramo (0..1]
+  kwhTramo   += h.kwh * frac
+  costeTramo += h.kwh * frac * h.eurPerKwh
+  si h.gap: hasGap = true
+```
+
+`kwh = kwhTramo`, `costEur = costeTramo`. Sin redondeo intermedio.
+
+#### Paso 2 — €/unidad por tramo
+
+```
+eurPerUnit = costEur / units            // units > 0 garantizado por validación
+```
+
+#### Paso 3 — Agregación por granularidad (calendario local Madrid)
+
+Cada tramo se asigna a un bucket según `granularity`, usando el **día/hora local** de `startTs`:
+
+| Granularidad | `key` | Notas |
+|--------------|-------|-------|
+| `SHIFT` | `"YYYY-MM-DD#<shift>"` | `shift` del tramo; tramos sin `shift` → `#SIN` |
+| `DAY`   | `"YYYY-MM-DD"` | |
+| `WEEK`  | `"YYYY-Www"` (ISO week) | |
+| `MONTH` | `"YYYY-MM"` | |
+
+Por bucket: `units = Σ`, `kwh = Σ`, `costEur = Σ`, `eurPerUnit = costEur / units`. (Se agrega coste y
+unidades y se divide al final — **no** se promedian los €/ud de los tramos.)
+
+#### Paso 4 — Baseline y detección de outliers
+
+```
+baseline = median(buckets[].eurPerUnit)
+para cada bucket: isOutlier = |bucket.eurPerUnit − baseline| > outlierPct * baseline
+```
+
+#### Paso 5 — Totales y evolución temporal
+
+```
+totalUnits   = Σ units;   totalKwh = Σ kwh;   totalCostEur = Σ costEur
+avgEurPerUnit = totalCostEur / totalUnits
+buckets ordenados por bucketStart → serie de evolución de €/ud
+```
+
+#### Notas de precisión y redondeo
+
+- Mismo criterio que §3.4 / §4.4 / §5.4: **sin redondeo intermedio**; el engine nunca redondea.
+  Imputación, costes, €/ud y mediana en doble precisión; el redondeo a 2 decimales es de presentación.
+- Tests de €/ud y € con tolerancia `±0.001`; conteo de unidades y kWh con `±0.001`.
+
+#### Calidad de dato
+
+Un tramo con `hasGap = true` (consumo imputado sobre huecos) se marca; el `KpiReport.hasGaps` agrega la
+señal. La UI muestra un **banner amarillo no bloqueante** (como M01/M03); el cálculo **no se bloquea**.
+
+### 6.5 Esquema GraphQL
+
+```graphql
+type ProductionUpload {
+  id:         ID!
+  supplyId:   String!
+  fileName:   String!
+  format:     String!   # "CSV" | "XLSX"
+  rowCount:   Int!
+  rangeStart: String!   # ISO 8601 UTC
+  rangeEnd:   String!
+  uploadedAt: String!
+}
+
+type KpiReportLine {
+  bucketKey:   String!
+  bucketStart: String!  # ISO 8601 UTC
+  units:       Float!
+  kwh:         Float!
+  costEur:     Float!
+  eurPerUnit:  Float!
+  isOutlier:   Boolean!
+}
+
+type KpiReport {
+  id:                 ID!
+  supplyId:           String!
+  uploadId:           String!
+  granularity:        String!   # "SHIFT" | "DAY" | "WEEK" | "MONTH"
+  rangeStart:         String!
+  rangeEnd:           String!
+  totalUnits:         Float!
+  totalKwh:           Float!
+  totalCostEur:       Float!
+  avgEurPerUnit:      Float!
+  baselineEurPerUnit: Float!
+  outlierPct:         Float!
+  hasGaps:            Boolean!
+  computedAt:         String!
+  lines:              [KpiReportLine!]!   # ordenadas por bucketStart (evolución)
+}
+
+input ProductionRowInput {
+  startTs: String!   # ISO 8601 (parseado en el front a UTC)
+  endTs:   String!
+  units:   Float!
+  shift:   String    # "M" | "T" | "N"
+  line:    String
+  batch:   String
+}
+
+input SubmitProductionInput {
+  cups:     String!
+  fileName: String!
+  format:   String!                     # "CSV" | "XLSX"
+  rows:     [ProductionRowInput!]!
+}
+
+input ComputeKpiInput {
+  uploadId:    String!
+  granularity: String       # default "DAY"
+  outlierPct:  Float        # default 0.20
+}
+
+extend type Query {
+  productionUploads(supplyId: String!): [ProductionUpload!]!
+  kpiReport(id: ID!): KpiReport
+  kpiReports(supplyId: String!): [KpiReport!]!
+}
+
+extend type Mutation {
+  # Valida y persiste las filas parseadas en el front (CSV/XLSX). Devuelve el upload creado.
+  submitProductionData(input: SubmitProductionInput!): ProductionUpload!
+
+  # Calcula (o recalcula, idempotente por uploadId+granularity) y persiste el KpiReport.
+  computeKpi(input: ComputeKpiInput!): KpiReport!
+}
+```
+
+**Errores esperados** (formato GraphQL estándar con `extensions.code`):
+
+| Código | Condición |
+|--------|-----------|
+| `SUPPLY_NOT_FOUND` | El CUPS no existe en PostgreSQL |
+| `BACKFILL_PENDING` / `BACKFILL_RUNNING` / `BACKFILL_FAILED` | El histórico aún no está disponible (§3.5) |
+| `KPI_INVALID_ROW` | Fila con `endTs ≤ startTs`, `units ≤ 0` o timestamp no parseable |
+| `KPI_OVERLAPPING_INTERVALS` | Tramos del mismo ámbito que se solapan en el tiempo (ver caveat §6.0 punto 3) |
+| `KPI_NO_PRODUCTION_DATA` | `submitProductionData` sin filas, o `computeKpi` sobre un upload vacío |
+| `KPI_UPLOAD_NOT_FOUND` | `computeKpi` sobre un `uploadId` inexistente |
+| `KPI_REPORT_NOT_FOUND` | `kpiReport(id)` — *devuelve `null`, no error* (consistente con `alert(id)`) |
+| `NO_CONSUMPTION_DATA` | No hay curva (`hourly_consumption`) en el rango del upload |
+
+> **Autorización** (§2.2): leer (`productionUploads`, `kpiReport`, `kpiReports`) → `assertSupplyAccess`
+> (DOMINION todo; ADMIN su cliente; GESTOR/USUARIO su suministro). Escribir
+> (`submitProductionData`, `computeKpi`) → rol de escritura (DOMINION/ADMIN/GESTOR); `USUARIO` es **solo
+> lectura** (mismo criterio que `savePreInvoice`/`savePowerOptimization`/`saveAlertConfig`).
+
+### 6.6 Casos de test — contrato de implementación
+
+> Los tests del `kpi-engine` son unitarios (sin I/O). Los del resolver/servicio son de integración con
+> Prisma e InfluxDB mockeados. Nomenclatura `TC-KPI-NNN` (§7.1).
+
+#### TC-KPI-001 — Imputación de tramo alineado a horas — Unit
+
+Tramo `06:00–10:00` (4 h) sobre buckets horarios `kwh=[10,10,10,10]`, `eurPerKwh=0.20` → `kwh=40`,
+`costEur=8.0`. Con `units=80` → `eurPerUnit=0.10`. Verifica suma e imputación sin fracciones.
+
+#### TC-KPI-002 — Imputación con bordes a mitad de hora — Unit
+
+Tramo `06:30–08:30` sobre buckets de 1 h: bucket 06:00 aporta `frac=0.5`, 07:00 `frac=1.0`, 08:00
+`frac=0.5`. Con `kwh=[10,10,10]` → `kwhTramo = 5+10+5 = 20`. Confirma la ponderación proporcional.
+
+#### TC-KPI-003 — Cuarto-horario (hours=0.25) — Unit
+
+Buckets de 15 min (`hours=0.25`) cubriendo un tramo exacto → la fracción usa `(b−a)/0.25h`. Verifica que
+la duración del bucket, no la hora fija, gobierna la ponderación.
+
+#### TC-KPI-004 — Coste = kWh × eurPerKwh compuesto — Unit
+
+`eurPerKwh` distinto por bucket (p. ej. PVPC variable + peaje/cargo) → `costEur = Σ kwh·frac·eurPerKwh`.
+Verifica que el engine respeta el precio por bucket (no promedia).
+
+#### TC-KPI-005 — €/unidad por tramo — Unit
+
+`costEur=12`, `units=240` → `eurPerUnit=0.05`. `units` distinto por tramo produce €/ud distinto.
+
+#### TC-KPI-006 — Agregación DAY suma coste y unidades — Unit
+
+Dos tramos el mismo día (`costEur=[6,4]`, `units=[60,40]`) → bucket `DAY`: `costEur=10`, `units=100`,
+`eurPerUnit=0.10`. Confirma que **se divide al final**, no se promedian los €/ud (0.10 y 0.10 aquí, pero
+con `costEur=[6,4]`/`units=[40,60]` daría 0.10 agregado ≠ media de 0.15 y 0.0667).
+
+#### TC-KPI-007 — Agregación SHIFT y "sin turno" — Unit
+
+Tramos con `shift` M/T/N → tres buckets `YYYY-MM-DD#M|T|N`; un tramo sin `shift` → bucket `#SIN`.
+
+#### TC-KPI-008 — Agregación WEEK (ISO) y MONTH — Unit
+
+Tramos en semanas/meses distintos → claves `YYYY-Www` / `YYYY-MM` correctas (incluida frontera de año).
+
+#### TC-KPI-009 — Baseline = mediana de buckets — Unit
+
+`eurPerUnit` de buckets `[0.10, 0.11, 0.09, 0.50]` → `baseline = mediana = 0.105`. Verifica mediana
+(robusta), no media.
+
+#### TC-KPI-010 — Outlier ±20 % sobre baseline — Unit
+
+Con `baseline=0.10`, `outlierPct=0.20`: bucket `0.13` → `isOutlier` (>0.12); `0.11` → no; `0.07` →
+`isOutlier` (<0.08, también a la baja).
+
+#### TC-KPI-011 — Tramo con gap marca hasGap — Unit
+
+Tramo cuyo consumo procede de buckets con `gap=true` → `hasGap=true` en el tramo y `hasGaps=true` en el
+resultado. El cálculo **no** se aborta.
+
+#### TC-KPI-012 — Totales y orden de evolución — Unit
+
+`totalCostEur`/`totalUnits`/`avgEurPerUnit` correctos; `buckets` devueltos ordenados por `bucketStart`.
+
+#### TC-KPI-013 — submitProductionData valida y persiste — Integration
+
+Filas válidas → crea `ProductionUpload` + `ProductionRow[]`, calcula `rangeStart/rangeEnd` y `rowCount`.
+Sin filas → `KPI_NO_PRODUCTION_DATA`.
+
+#### TC-KPI-014 — Fila inválida → KPI_INVALID_ROW — Integration
+
+`endTs ≤ startTs`, `units ≤ 0` o timestamp no parseable → `KPI_INVALID_ROW` (no persiste nada).
+
+#### TC-KPI-015 — Tramos solapados → KPI_OVERLAPPING_INTERVALS — Integration
+
+Dos tramos del mismo ámbito con solape temporal → `KPI_OVERLAPPING_INTERVALS` (ver caveat §6.0 punto 3).
+
+#### TC-KPI-016 — computeKpi calcula y persiste — Integration
+
+Upload válido + curva disponible → `KpiReport` con `lines` por bucket. `uploadId` inexistente →
+`KPI_UPLOAD_NOT_FOUND`; sin curva en el rango → `NO_CONSUMPTION_DATA`.
+
+#### TC-KPI-017 — computeKpi idempotente por (uploadId, granularity) — Integration
+
+Dos llamadas con el mismo `uploadId` y `granularity` actualizan el **mismo** `KpiReport` (por
+`@@unique`), no duplican. Distinta `granularity` → report distinto.
+
+#### TC-KPI-018 — Reutiliza la composición de precio de M01 — Integration
+
+El `eurPerKwh` por hora coincide con `pvpc_h + tollEnergy[p] + chargeEnergy[p]` (mismos maestros que
+M01); un cambio de PVPC/peaje altera el coste de forma coherente.
+
+#### TC-KPI-019 — Consultas y autorización — Integration
+
+`productionUploads`/`kpiReports` filtran por supply; `kpiReport(id)` inexistente → `null`. `USUARIO`
+sobre `submitProductionData`/`computeKpi` → `FORBIDDEN`; `ADMIN` de otro cliente sobre datos ajenos →
+`FORBIDDEN` (reglas §2.2).
+
+#### TC-KPI-020 — Backfill no listo → BACKFILL_* — Integration
+
+`backfillStatus = PENDING/RUNNING/FAILED` → `BACKFILL_PENDING`/`BACKFILL_RUNNING`/`BACKFILL_FAILED`
+(mismo contrato que §3.7 / §4.6 / §5.6).
+
+### 6.7 Front (apps/web) — no normativo en lo visual
+
+> Como en M02/M03 (§4.7/§5.7), el detalle visual no es contrato; el **flujo de datos** (mutations/queries
+> que invoca) **sí** lo es. Se prioriza la claridad y se documenta la pantalla para enseñar el módulo en
+> modo demo.
+
+- **Topbar**: nueva entrada **KPI** junto a Pre-factura / Optimización / Alertas (`shared/topbar.component.ts`).
+- **Ruta** `/kpi` (protegida por `authGuard`) → `KpiComponent`. Reutiliza `GraphqlService` (HTTP-plano).
+- **Carga del fichero**: `<input type="file" accept=".csv,.xlsx">`. El parseo es **en el cliente**: CSV
+  con un parser ligero propio; `.xlsx` con **SheetJS** (`xlsx`). Se mapean las columnas
+  `timestamp_inicio` / `timestamp_fin` / `unidades_producidas` (+ opcionales `turno`/`linea`/`lote`) a
+  `ProductionRowInput`.
+- **Previsualización**: tabla de las filas parseadas + recuento antes de enviar; avisos de validación en
+  cliente (fechas, unidades), que el backend **revalida**.
+- **Flujo**: botón **Calcular KPI** → `submitProductionData` → `computeKpi(granularity)`. Selector de
+  **granularidad** (Turno / Día / Semana / Mes).
+- **Resultado**: tabla de **€/ud por bucket** con los **outliers resaltados**, KPI medio (`avgEurPerUnit`)
+  y una **serie/gráfico de evolución** temporal (orden por `bucketStart`). **Banner amarillo** no
+  bloqueante si `hasGaps`.
+- **Paleta**: coherente con M03 (azul/amarillo); outliers en ámbar.
+
+### 6.8 Modo demo (para probar `/kpi` sin DBs reales)
+
+Mismo mecanismo de holders que M01–M03 (`runtime.ts`), arrancando con `npm run demo`:
+
+- **`makeDemoKpiDataSource()`**: genera una curva horaria determinista de `hourly_consumption` + un
+  `pvpc_price` determinista sobre el rango y compone el `eurPerKwh` (reutiliza el patrón de
+  `demoAlertDataSource.ts`; sin `Math.random()`, reproducible). En `index.ts` se inyecta
+  `makeInfluxKpiDataSource(queryApi)`; en `demo.ts`, `makeDemoKpiDataSource()`.
+- **`ProductionUpload` demo sembrado** en el store en memoria (`demo/store.ts`): varios días con turnos
+  M/T/N y **al menos un tramo de €/ud claramente atípico** (p. ej. un turno con baja producción y
+  consumo normal) para ejercitar la detección de outliers ±20 %. Así la pantalla `/kpi` muestra datos al
+  entrar **sin** necesidad de subir fichero, y el flujo de subida sigue siendo probable.
+- **Delegados Prisma** en `store.ts` para `productionUpload`, `productionRow`, `kpiReport`,
+  `kpiReportLine`, sembrados en ambos CUPS demo.
+- **Resultado esperado documentado**: en demo, `computeKpi(uploadId, "DAY")` produce un `KpiReport` con
+  `lines` por día, `baselineEurPerUnit` coherente y **≥ 1** línea con `isOutlier = true`; el recálculo
+  con el mismo `(uploadId, granularity)` es idempotente (no duplica).
+
+---
+
+## 7. Convenciones de test
 
 > Sección transversal. Se replica la estructura `§N.X Casos de test` en cada módulo M02–M06 siguiendo estas mismas convenciones.
 
-### 6.1 Nomenclatura
+### 7.1 Nomenclatura
 
 `TC-{MOD}-{NNN}`
 
@@ -2801,7 +3351,7 @@ No hay puntos `gap="false"` del día evaluado → `NO_CONSUMPTION_DATA`.
 | `CO2`  | M05 — Huella de carbono |
 | `SOL`  | M06 — Simulación de autoconsumo solar |
 
-### 6.2 Capas
+### 7.2 Capas
 
 | Capa | Descripción | I/O externo |
 |------|-------------|-------------|
@@ -2813,14 +3363,14 @@ Cada caso de test declara su capa en el campo **Módulo** (`— Unit` / `— Int
 
 Los tests de M01 y M02 son Unit e Integration. No se definen tests E2E hasta que exista frontend.
 
-### 6.3 Herramientas
+### 7.3 Herramientas
 
 - **Unit / Integration**: Vitest
 - **Fixtures**: datos sintéticos reutilizables en `apps/api/test/fixtures/`
 - **Mocks HTTP**: `vi.spyOn` sobre los adaptadores de ingesta
 - **Mock DB**: cliente Prisma mockeado con `vi.hoisted` (**no** usar `vitest-mock-extended`); cliente InfluxDB mockeado a nivel de módulo
 
-### 6.4 Cobertura mínima por módulo
+### 7.4 Cobertura mínima por módulo
 
 - pricing-engine (o equivalente de cálculo puro): 100 % de ramas del algoritmo
 - Resolvers GraphQL: todos los errores definidos en `§N.5 Errores esperados`
