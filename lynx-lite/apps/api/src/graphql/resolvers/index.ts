@@ -6,12 +6,14 @@ import { alertResolvers } from './alert.js';
 import { kpiResolvers } from './kpi.js';
 import { carbonResolvers } from './carbon.js';
 import { solarResolvers } from './solar.js';
+import { comparisonResolvers } from './comparison.js';
 
 export const resolvers = {
   Query: {
     ...authResolvers.Query,
     ...supplyResolvers.Query,
     ...preInvoiceResolvers.Query,
+    ...comparisonResolvers.Query,
     ...powerOptimizationResolvers.Query,
     ...alertResolvers.Query,
     ...kpiResolvers.Query,

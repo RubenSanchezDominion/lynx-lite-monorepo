@@ -7,7 +7,8 @@ import { computePreInvoice, type ComputedPreInvoice } from '../../services/preIn
 import type { PreInvoiceLine } from '@prisma/client';
 
 // Mapea el resultado de cálculo al tipo GraphQL PreInvoice (sin persistir).
-function computedToGql(c: ComputedPreInvoice) {
+// Exportado para reutilizar en la comparativa (M07).
+export function computedToGql(c: ComputedPreInvoice) {
   const p = c.pricing;
   return {
     id: 'preview', // no persistido

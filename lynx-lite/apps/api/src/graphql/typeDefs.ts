@@ -124,6 +124,37 @@ export const typeDefs = /* GraphQL */ `
     periodTo: String!
   }
 
+  # ─── Comparativa de suministros (M07) ─────────────────────────────────────────
+  type ComparisonDelta {
+    totalA: Float!
+    totalB: Float!
+    deltaTotal: Float!
+    deltaTotalPct: Float # null si totalA = 0
+    powerTermDelta: Float!
+    energyTermDelta: Float!
+    excessPowerDelta: Float!
+    reactiveDelta: Float # null si ambos lados sin reactiva
+    meterRentalDelta: Float!
+    taxesDelta: Float!
+    kwhA: Float!
+    kwhB: Float!
+    avgCostPerKwhA: Float # null si kwhA = 0
+    avgCostPerKwhB: Float # null si kwhB = 0
+    deltaCostPerKwh: Float # null si falta algún avgCost
+    sameTariff: Boolean!
+  }
+
+  type ComparisonResult {
+    a: PreInvoice!
+    b: PreInvoice!
+    delta: ComparisonDelta!
+  }
+
+  input ComparisonInput {
+    a: PreInvoiceInput!
+    b: PreInvoiceInput!
+  }
+
   # ─── Optimización de potencia (M02) ───────────────────────────────────────────
   type PowerOptimizationPeriod {
     period: Int!
@@ -364,6 +395,8 @@ export const typeDefs = /* GraphQL */ `
     calculatePreInvoice(input: PreInvoiceInput!): PreInvoice!
     preInvoice(id: ID!): PreInvoice
     preInvoices(supplyId: String!, limit: Int, offset: Int): [PreInvoice!]!
+
+    calculateComparison(input: ComparisonInput!): ComparisonResult!
 
     calculatePowerOptimization(input: PowerOptimizationInput!): PowerOptimization!
     powerOptimization(id: ID!): PowerOptimization

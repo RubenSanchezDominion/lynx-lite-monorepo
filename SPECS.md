@@ -1,8 +1,6 @@
 # SPECS.md — lynx-lite
 
-**Version**: 0.4-DRAFT  
-**Fecha**: 2026-06-12  
-**Estado**: Pendiente de aprobación
+**Version**: 0.4-DRAFT
 
 ---
 
@@ -16,7 +14,8 @@
 6. [M04 — KPI de coste energético por unidad producida](#6-m04--kpi-de-coste-energético-por-unidad-producida)
 7. [M05 — Huella de carbono](#7-m05--huella-de-carbono)
 8. [M06 — Simulación de autoconsumo solar](#8-m06--simulación-de-autoconsumo-solar)
-9. [Convenciones de test](#9-convenciones-de-test)
+9. [M07 — Comparativa de suministros](#9-m07--comparativa-de-suministros)
+10. [Convenciones de test](#10-convenciones-de-test)
 
 ---
 
@@ -4209,11 +4208,331 @@ Mismo mecanismo de holders que M01–M05 (`runtime.ts`), arrancando con `npm run
 
 ---
 
-## 9. Convenciones de test
+## 9. M07 — Comparativa de suministros
 
-> Sección transversal. Se replica la estructura `§N.X Casos de test` en cada módulo M02–M06 siguiendo estas mismas convenciones.
+Compara **dos pre-facturas** lado a lado y expone las **diferencias** (deltas) entre ambas, con
+visualización gráfica. Cubre dos casos de uso con un único mecanismo:
 
-### 9.1 Nomenclatura
+1. **Mes vs Mes** sobre el **mismo CUPS** — evolución temporal de un suministro.
+2. **CUPS vs CUPS** en el **mismo periodo** — comparación entre suministros.
+
+A diferencia de M02–M06, **no introduce lógica de dominio nueva**: una comparación es, literalmente,
+*"calcular dos pre-facturas (M01, §3) y restar"*. Por tanto M07 **no tiene engine propio, ni modelo
+Prisma, ni measurement de InfluxDB, ni data source nuevo**: orquesta dos llamadas a `computePreInvoice`
+(§3.4) y calcula deltas. Es el módulo más ligero del backend; el grueso del valor está en el **front**
+(gráficas Chart.js). Como `calculatePreInvoice`, es **on-demand y no se persiste** (vista derivada).
+
+### 9.0 Decisiones de diseño (premisas de este módulo)
+
+> **Un input genérico cubre los dos modos.** La comparación es siempre *"lado A vs lado B"*, donde cada
+> lado es un `PreInvoiceInput` (`{ cups, periodFrom, periodTo }`). El "modo" no existe en el backend: es
+> Mes-vs-Mes si los lados comparten `cups` y difieren las fechas, y CUPS-vs-CUPS si comparten fechas y
+> difieren los `cups`. El backend es **agnóstico**; es el front quien presenta el toggle y arma los lados.
+
+> **Los deltas son B − A.** Todas las diferencias se calculan como *lado B menos lado A* (`deltaX =
+> b.X − a.X`). Un delta **positivo** significa que B es mayor que A. `deltaTotalPct` es relativo a A:
+> `(deltaTotal / a.total) × 100`; **null** si `a.total = 0` (no se divide por cero). El front pinta el
+> signo con color (↑ rojo = más caro, ↓ verde = más barato).
+
+> **Comparar tarifas distintas: el € absoluto engaña; manda el €/kWh.** Comparar un 2.0TD (pyme pequeña)
+> con un 3.0TD (industrial) por **importe absoluto** es comparar peras con manzanas: el industrial siempre
+> "pierde" por tamaño, no por eficiencia. Por eso M07 expone también métricas **normalizadas**: `kwh` y
+> `avgCostPerKwh = total / kwh` por lado. La bandera `sameTariff` (`a.tariff === b.tariff`) le dice al
+> front si el desglose por período **P1–P6 es comparable** (3 períodos en 2.0TD vs 6 en 3.0TD **no**
+> alinean): si `sameTariff = false`, el front oculta ese desglose y muestra la comparación de **€/kWh
+> medio** en su lugar.
+
+> **`kwh` de un lado = suma de las líneas de energía.** El total de energía consumida se obtiene sumando
+> `quantity` de las líneas de la pre-factura con `unit = 'kWh'` (las "Término de energía Px" del
+> `pricing-engine`, §3.4). No se vuelve a leer InfluxDB: el dato ya viene en la pre-factura calculada.
+
+> **`deltaTotal` es autoritativo (no reconciliado).** `deltaTotal = b.total − a.total` se toma
+> directamente de los totales. Los deltas por componente (potencia, energía, exceso, reactiva, alquiler,
+> impuestos) son un **desglose informativo** para la gráfica; no se exige que sumen exactamente
+> `deltaTotal` (evita fragilidad ante `surplusCompensation`, placeholder 0 en M01 v1).
+
+> **Sin redondeo intermedio** (igual que §3.4 … §8.4): los deltas se calculan en doble precisión; el
+> redondeo es solo de presentación (front, `number:'1.2-2'`).
+
+### 9.0bis Prerrequisitos de implementación
+
+- **Sin paquete nuevo**: M07 **reutiliza** `computePreInvoice` de `apps/api/src/services/preInvoiceService.ts`.
+- **Sin modelo Prisma**: la comparativa **no se persiste** (vista derivada on-demand, como la query
+  `calculatePreInvoice`).
+- **Sin measurement de InfluxDB**: lee a través de M01, que ya consume `hourly_consumption`/`pvpc_price`.
+- **Sin data source nuevo**: reutiliza el `PreInvoiceDataSource` ya inyectado en `runtime.ts`
+  (`getDataSource()`), tanto en real (`index.ts`) como en demo (`makeDemoDataSource()` de `demo.ts`).
+- **Nuevo servicio** `apps/api/src/services/comparisonService.ts`: `computeComparison(input, deps)` →
+  invoca `computePreInvoice` 2× y calcula deltas.
+- **Nuevo resolver** `apps/api/src/graphql/resolvers/comparison.ts` + registro en `resolvers/index.ts`.
+- **Extensión de typeDefs** (`graphql/typeDefs.ts`): `ComparisonInput`, `ComparisonDelta`,
+  `ComparisonResult`, y la query `calculateComparison`. Reutiliza los tipos `PreInvoice`, `PreInvoiceInput`
+  y `Tariff` existentes.
+- **Front**: dependencia nueva `chart.js` en `apps/web` (sin `ng2-charts`); página `/comparacion`.
+- **Patrón de tests**: Vitest; mock de Prisma con `vi.hoisted` (§10.3).
+- **Sin worker**.
+
+### 9.1 Fuentes de datos
+
+M07 **no añade fuentes**: cada lado de la comparación se calcula con `computePreInvoice` (M01), que
+consume exactamente las fuentes de §3.1.
+
+| Fuente | Dato | Uso en M07 |
+|--------|------|------------|
+| (M01, §3.1) | Pre-factura completa de cada lado (términos, impuestos, total, líneas, gaps) | Insumo de la comparación |
+
+> La comparación es **pura transformación** de dos resultados de M01. Si cualquiera de los dos lados no
+> es calculable, M07 propaga el error de M01 de ese lado (ver §9.5).
+
+### 9.2 Modelos Prisma
+
+**Ninguno.** M07 no define ni modifica modelos. La comparativa es una vista derivada que **no se
+persiste** (consistente con la query `calculatePreInvoice`, que devuelve `id = 'preview'`).
+
+### 9.3 Esquema InfluxDB
+
+**Ninguno.** M07 no lee InfluxDB directamente; lo hace M01 por debajo.
+
+### 9.4 Algoritmo de cálculo — paso a paso
+
+El cálculo vive en `comparisonService.ts` (`computeComparison`). No hay engine puro separado porque la
+única lógica es restar; la transformación es trivial y se testea a nivel de servicio.
+
+```typescript
+// ─── Input / Output ───────────────────────────────────────────────────────────
+
+interface ComparisonInput {
+  a: { cups: string; periodFrom: string; periodTo: string };  // lado A (referencia)
+  b: { cups: string; periodFrom: string; periodTo: string };  // lado B
+}
+
+interface ComparisonDelta {
+  totalA: number;  totalB: number;
+  deltaTotal: number;            // b.total − a.total (autoritativo)
+  deltaTotalPct: number | null;  // (deltaTotal / a.total) × 100; null si a.total = 0
+  // Desglose informativo (B − A) por componente:
+  powerTermDelta: number;
+  energyTermDelta: number;
+  excessPowerDelta: number;
+  reactiveDelta: number | null;  // null si AMBOS lados tienen reactiveEnergy = null
+  meterRentalDelta: number;
+  taxesDelta: number;            // (iee+iva) de B − (iee+iva) de A
+  // Normalización (comparación honesta entre tamaños/tarifas):
+  kwhA: number;  kwhB: number;
+  avgCostPerKwhA: number | null; // a.total / kwhA; null si kwhA = 0
+  avgCostPerKwhB: number | null;
+  deltaCostPerKwh: number | null;// avgCostPerKwhB − avgCostPerKwhA; null si falta alguno
+  sameTariff: boolean;           // a.tariff === b.tariff
+}
+
+interface ComparisonResult { a: ComputedPreInvoice; b: ComputedPreInvoice; delta: ComparisonDelta; }
+```
+
+#### Paso 1 — Calcular ambos lados (M01)
+
+```
+a = computePreInvoice(input.a, deps)
+b = computePreInvoice(input.b, deps)
+```
+
+> **Autorización**: antes de calcular, el resolver resuelve el `Supply` de **ambos** `cups` y aplica
+> `assertSupplyAccess` a cada uno (§9.5). Si el actor no puede ver uno de los dos → `FORBIDDEN`.
+
+#### Paso 2 — kWh y coste unitario por lado
+
+```
+kwh(side)  = Σ línea.quantity  ∀ línea de side con unit === 'kWh'
+avgCost(side) = side.total / kwh(side)   si kwh(side) > 0, si no null
+```
+
+#### Paso 3 — Deltas (B − A)
+
+```
+deltaTotal       = b.total − a.total
+deltaTotalPct    = a.total ≠ 0 ? (deltaTotal / a.total) × 100 : null
+powerTermDelta   = b.powerTerm   − a.powerTerm
+energyTermDelta  = b.energyTerm  − a.energyTerm
+excessPowerDelta = b.excessPower − a.excessPower
+meterRentalDelta = b.meterRental − a.meterRental
+taxesDelta       = (b.iee + b.iva) − (a.iee + a.iva)
+reactiveDelta    = (a.react = null ∧ b.react = null) ? null : (b.react ?? 0) − (a.react ?? 0)
+deltaCostPerKwh  = (avgCostA = null ∨ avgCostB = null) ? null : avgCostB − avgCostA
+sameTariff       = a.tariff === b.tariff
+```
+
+#### Notas de precisión y redondeo
+
+- **Sin redondeo intermedio** (§3.4): todos los deltas en doble precisión; redondeo solo en presentación.
+- Tests de € con tolerancia `±0.001`; de ratios/€-por-kWh con `±0.0001`.
+
+### 9.5 Esquema GraphQL
+
+```graphql
+input ComparisonSideInput {
+  cups:       String!
+  periodFrom: String!   # "YYYY-MM-DD"
+  periodTo:   String!
+}
+
+input ComparisonInput {
+  a: ComparisonSideInput!   # lado A (referencia)
+  b: ComparisonSideInput!
+}
+
+type ComparisonDelta {
+  totalA:           Float!
+  totalB:           Float!
+  deltaTotal:       Float!
+  deltaTotalPct:    Float        # null si totalA = 0
+  powerTermDelta:   Float!
+  energyTermDelta:  Float!
+  excessPowerDelta: Float!
+  reactiveDelta:    Float        # null si ambos lados sin reactiva
+  meterRentalDelta: Float!
+  taxesDelta:       Float!
+  kwhA:             Float!
+  kwhB:             Float!
+  avgCostPerKwhA:   Float        # null si kwhA = 0
+  avgCostPerKwhB:   Float        # null si kwhB = 0
+  deltaCostPerKwh:  Float        # null si falta algún avgCost
+  sameTariff:       Boolean!
+}
+
+type ComparisonResult {
+  a:     PreInvoice!   # reutiliza el tipo de M01 (§3.5)
+  b:     PreInvoice!
+  delta: ComparisonDelta!
+}
+
+extend type Query {
+  # Calcula ambas pre-facturas (no persiste) y devuelve los deltas. On-demand.
+  calculateComparison(input: ComparisonInput!): ComparisonResult!
+}
+```
+
+**Errores esperados**: M07 **propaga** los errores de `computePreInvoice` (§3.5) del lado que falle —
+`SUPPLY_NOT_FOUND`, `CONTRACT_NOT_FOUND`, `BACKFILL_PENDING/RUNNING/FAILED`, `NO_CONSUMPTION_DATA` — más:
+
+| Código | Condición |
+|--------|-----------|
+| `FORBIDDEN` | El actor no tiene acceso a **uno** de los dos `cups` (regla §2.2) |
+
+> **Autorización** (§2.2): es una operación de **lectura** → `assertSupplyAccess` sobre **cada** lado.
+> No hay mutación: la comparativa no se guarda.
+
+### 9.6 Casos de test — contrato de implementación
+
+> Tests de integración del servicio/resolver con Prisma e InfluxDB (vía data source demo) mockeados.
+> El cálculo de deltas y de `kwh`/`avgCost` admite también tests unitarios sobre dos `ComputedPreInvoice`
+> sintéticos. Nomenclatura `TC-CMP-NNN` (§10.1).
+
+#### TC-CMP-001 — deltaTotal = B − A — Unit
+
+Dos pre-facturas sintéticas `a.total=100`, `b.total=130` → `deltaTotal=30`, `totalA=100`, `totalB=130`.
+
+#### TC-CMP-002 — deltaTotalPct relativo a A; null si A=0 — Unit
+
+`a.total=100`, `b.total=130` → `deltaTotalPct=30`. `a.total=0` → `deltaTotalPct=null` (sin división por cero).
+
+#### TC-CMP-003 — Deltas por componente (B − A) — Unit
+
+Verifica `powerTermDelta`, `energyTermDelta`, `excessPowerDelta`, `meterRentalDelta`, `taxesDelta`
+(= (iee+iva)_B − (iee+iva)_A) con valores conocidos.
+
+#### TC-CMP-004 — kwh = Σ líneas con unit 'kWh' — Unit
+
+Pre-factura con líneas `[Término de energía P1: 100 kWh, P2: 50 kWh, Término de potencia: 5 kW·día]` →
+`kwh = 150` (ignora las que no son `kWh`).
+
+#### TC-CMP-005 — avgCostPerKwh = total/kwh; null si kwh=0 — Unit
+
+`total=300`, `kwh=150` → `avgCostPerKwh=2`. `kwh=0` → `null` (y `deltaCostPerKwh=null`).
+
+#### TC-CMP-006 — sameTariff y comparación cruzada — Integration
+
+Lado A `2.0TD`, lado B `3.0TD`, mismo periodo → `sameTariff=false`; `avgCostPerKwhA/B` calculados; el
+resultado incluye ambas `PreInvoice` completas para que el front decida qué desglose mostrar.
+
+#### TC-CMP-007 — Mismo CUPS, dos meses → delta por días — Integration
+
+Mismo `cups`, enero (31 d) vs febrero (28 d) en demo → `sameTariff=true`, `deltaTotal` refleja la
+diferencia (signo correcto), deltas por componente coherentes.
+
+#### TC-CMP-008 — reactiveDelta con nulos — Unit
+
+Ambos lados `reactiveEnergy=null` (p. ej. 2.0TD) → `reactiveDelta=null`. Un lado con reactiva y otro sin
+→ trata el ausente como 0.
+
+#### TC-CMP-009 — Propagación de gaps — Integration
+
+Si A o B tienen `gapHoursCount > 0`, el dato se conserva en `result.a`/`result.b` (el front muestra el
+banner no bloqueante, §1.5). M07 no recalcula ni bloquea por gaps.
+
+#### TC-CMP-010 — Autorización por ambos lados — Integration
+
+`USUARIO`/`ADMIN` sin acceso a **uno** de los dos `cups` → `FORBIDDEN` (no se calcula nada). Acceso a
+ambos → OK (lectura permitida a todos los roles con `assertSupplyAccess`).
+
+#### TC-CMP-011 — Propagación de error de un lado — Integration
+
+Lado B con `cups` inexistente → `SUPPLY_NOT_FOUND`; lado B sin curva → `NO_CONSUMPTION_DATA`. El error del
+lado que falla aflora tal cual (no se enmascara).
+
+#### TC-CMP-012 — Sin redondeo intermedio — Unit
+
+Totales con muchos decimales → `deltaTotal` y `avgCost` en doble precisión; el redondeo a 2 decimales solo
+ocurriría en presentación, no en la respuesta del servicio.
+
+### 9.7 Front (apps/web) — no normativo en lo visual
+
+> Como en M02–M06, el detalle visual no es contrato; el **flujo de datos** **sí** lo es.
+
+- **Topbar**: nueva entrada **Comparativa** junto a Pre-factura / … / Solar (nav hardcodeada).
+- **Ruta** `/comparacion` (protegida por `authGuard`) → `ComparisonComponent`. Reutiliza `GraphqlService`
+  y la dependencia nueva `chart.js`.
+- **Toggle de modo**: «Mes vs Mes (mismo CUPS)» / «CUPS vs CUPS (mismo periodo)». Solo cambia qué
+  selectores se muestran y cómo se arman los lados `a`/`b` del input; la query es la misma.
+- **Flujo**: botón **Comparar** → una sola request `calculateComparison(input)`.
+- **Resultado**:
+  - **Gráfica de barras agrupadas** (Chart.js): categorías [T. potencia, T. energía, Exceso, Reactiva,
+    Alquiler, Impuestos, **TOTAL**], dos series (A vs B).
+  - Si `sameTariff = true`: segunda gráfica por **período P1–P6** (kWh y/o €). Si `false`: se oculta y se
+    muestra en su lugar la barra de **€/kWh medio** (`avgCostPerKwhA` vs `avgCostPerKwhB`).
+  - **Badges de delta**: `deltaTotal` € y `deltaTotalPct` %, con color/flecha (↑ rojo más caro, ↓ verde
+    más barato) y `deltaCostPerKwh`.
+  - **Tabla lado-a-lado** A | B | Δ (reutiliza el estilo de la tabla de pre-factura).
+  - **Banner de gaps** no bloqueante si `a.gapHoursCount > 0 || b.gapHoursCount > 0` (§1.5).
+- **Render Chart.js**: `<canvas>` + `@ViewChild`; destruir la instancia previa antes de re-renderizar
+  para evitar fugas al recomparar.
+
+### 9.8 Modo demo (para probar `/comparacion` sin DBs reales)
+
+M07 **no necesita data source demo propio**: reutiliza `makeDemoDataSource()` ya inyectado en `demo.ts`
+(el mismo que sirve `calculatePreInvoice`). Los dos CUPS demo sembrados (`ES0031000000000002JN` 2.0TD y
+`ES0031000000000001JN` 3.0TD) bastan para ambos modos.
+
+- **Resultado esperado documentado**:
+  - **Mes vs Mes** (mismo CUPS, enero vs febrero): `sameTariff=true`; como el generador demo es
+    determinista (kWh/día fijo por período), el `deltaTotal` refleja sobre todo la **diferencia de días**
+    del periodo (31 vs 28), no estacionalidad. Es coherente; **no** se inventa estacionalidad sintética en
+    este alcance (limitación consciente — la demo "mes vs mes" luce sosa salvo eligiendo periodos de
+    distinta duración).
+  - **CUPS vs CUPS** (2.0TD vs 3.0TD, mismo periodo): `sameTariff=false`; el front oculta el desglose
+    P1–P6 y muestra la comparación **€/kWh medio** — aquí es donde la demo luce.
+
+### 9.9 Estado de implementación
+
+**ESPECIFICADO — pendiente de implementación.** Esta pasada deja únicamente la especificación (§9). No se
+ha tocado código de `apps/api` ni `apps/web`. La implementación (servicio + resolver + typeDefs + front
+con Chart.js + tests `TC-CMP-001..012`) se abordará en una segunda fase, sobre esta spec ya validada.
+
+---
+
+## 10. Convenciones de test
+
+> Sección transversal. Se replica la estructura `§N.X Casos de test` en cada módulo M02–M07 siguiendo estas mismas convenciones.
+
+### 10.1 Nomenclatura
 
 `TC-{MOD}-{NNN}`
 
@@ -4226,8 +4545,9 @@ Mismo mecanismo de holders que M01–M05 (`runtime.ts`), arrancando con `npm run
 | `KPI`  | M04 — KPI de coste por unidad producida |
 | `CO2`  | M05 — Huella de carbono |
 | `SOL`  | M06 — Simulación de autoconsumo solar |
+| `CMP`  | M07 — Comparativa de suministros |
 
-### 9.2 Capas
+### 10.2 Capas
 
 | Capa | Descripción | I/O externo |
 |------|-------------|-------------|
@@ -4239,14 +4559,14 @@ Cada caso de test declara su capa en el campo **Módulo** (`— Unit` / `— Int
 
 Los tests de M01 y M02 son Unit e Integration. No se definen tests E2E hasta que exista frontend.
 
-### 9.3 Herramientas
+### 10.3 Herramientas
 
 - **Unit / Integration**: Vitest
 - **Fixtures**: datos sintéticos reutilizables en `apps/api/test/fixtures/`
 - **Mocks HTTP**: `vi.spyOn` sobre los adaptadores de ingesta
 - **Mock DB**: cliente Prisma mockeado con `vi.hoisted` (**no** usar `vitest-mock-extended`); cliente InfluxDB mockeado a nivel de módulo
 
-### 9.4 Cobertura mínima por módulo
+### 10.4 Cobertura mínima por módulo
 
 - pricing-engine (o equivalente de cálculo puro): 100 % de ramas del algoritmo
 - Resolvers GraphQL: todos los errores definidos en `§N.5 Errores esperados`
