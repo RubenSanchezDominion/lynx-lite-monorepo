@@ -3,7 +3,14 @@ import { prisma } from '../../lib/prisma.js';
 import { gqlError } from '../../lib/errors.js';
 import { requireAuth, assertSupplyAccess, assertCanWritePreInvoice } from '../../services/authz.js';
 import { getSolarDataSource } from '../../services/runtime.js';
-import { simulateSolarForSupply, type SimulateSolarInput } from '../../services/solarService.js';
+import {
+  simulateSolarForSupply,
+  optimizeSolarSizingForSupply,
+  optimizeSolarOrientationForSupply,
+  type SimulateSolarInput,
+  type OptimizeSolarSizingInput,
+  type OptimizeSolarOrientationInput,
+} from '../../services/solarService.js';
 
 interface SimRow {
   id: string;
@@ -92,6 +99,26 @@ export const solarResolvers = {
         orderBy: { computedAt: 'desc' },
       })) as SimRow[];
       return list.map(simToGql);
+    },
+
+    // §8.10 — dimensionado óptimo (no persiste). El resultado del engine ya tiene el shape del SDL.
+    optimizeSolarSizing: async (_p: unknown, args: { input: OptimizeSolarSizingInput }, ctx: ApolloContext) => {
+      const actor = requireAuth(ctx.user);
+      const supply = await prisma.supply.findUnique({ where: { cups: args.input.cups } });
+      if (!supply) throw gqlError('SUPPLY_NOT_FOUND');
+      assertSupplyAccess(actor, supply);
+      assertCanWritePreInvoice(actor); // USUARIO → FORBIDDEN
+      return optimizeSolarSizingForSupply(args.input, { prisma, dataSource: getSolarDataSource() });
+    },
+
+    // §8.11 — orientación óptima (no persiste).
+    optimizeSolarOrientation: async (_p: unknown, args: { input: OptimizeSolarOrientationInput }, ctx: ApolloContext) => {
+      const actor = requireAuth(ctx.user);
+      const supply = await prisma.supply.findUnique({ where: { cups: args.input.cups } });
+      if (!supply) throw gqlError('SUPPLY_NOT_FOUND');
+      assertSupplyAccess(actor, supply);
+      assertCanWritePreInvoice(actor); // USUARIO → FORBIDDEN
+      return optimizeSolarOrientationForSupply(args.input, { prisma, dataSource: getSolarDataSource() });
     },
   },
 

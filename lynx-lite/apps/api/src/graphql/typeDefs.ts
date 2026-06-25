@@ -385,6 +385,83 @@ export const typeDefs = /* GraphQL */ `
     costPerKwp: Float # default 1000
   }
 
+  # ─── Optimizadores FV (M06 v2) ────────────────────────────────────────────────
+  input FinancialAssumptionsInput {
+    horizonYears: Int # default 25
+    discountRatePct: Float # default 4
+    degradationPctPerYear: Float # default 0.5
+    priceEscalationPctPerYear: Float # default 0
+  }
+
+  # §8.10 — dimensionado óptimo del kWp (curva VAN vs kWp + óptimo). No persiste.
+  input OptimizeSolarSizingInput {
+    cups: String!
+    lat: Float!
+    lon: Float!
+    lossPct: Float
+    tilt: Float
+    azimuth: Float
+    costPerKwp: Float
+    kwpMin: Float!
+    kwpMax: Float!
+    kwpStep: Float
+    maxBudgetEur: Float
+    financial: FinancialAssumptionsInput
+  }
+
+  type SolarSizingPoint {
+    kwp: Float!
+    annualProductionKwh: Float!
+    annualSelfConsumptionKwh: Float!
+    annualSurplusKwh: Float!
+    selfConsumptionRatio: Float!
+    coverageRatio: Float!
+    annualSavingEur: Float!
+    capexEur: Float!
+    npvEur: Float!
+    paybackYears: Float
+  }
+
+  type SolarSizingResult {
+    curve: [SolarSizingPoint!]!
+    recommendedKwp: Float!
+    recommended: SolarSizingPoint!
+    horizonYears: Int!
+    discountRatePct: Float!
+    degradationPctPerYear: Float!
+    priceEscalationPctPerYear: Float!
+  }
+
+  # §8.11 — orientación/inclinación óptima por VAN del autoconsumo. No persiste.
+  input OptimizeSolarOrientationInput {
+    cups: String!
+    lat: Float!
+    lon: Float!
+    kwp: Float!
+    lossPct: Float
+    costPerKwp: Float
+    tilts: [Float!]
+    azimuths: [Float!]
+    includeEastWestSplit: Boolean # default true
+    financial: FinancialAssumptionsInput
+  }
+
+  type SolarOrientationPoint {
+    tilt: Float!
+    azimuth: Float!
+    label: String
+    annualProductionKwh: Float!
+    annualSelfConsumptionKwh: Float!
+    selfConsumptionRatio: Float!
+    annualSavingEur: Float!
+    npvEur: Float!
+  }
+
+  type SolarOrientationResult {
+    candidates: [SolarOrientationPoint!]!
+    recommended: SolarOrientationPoint!
+  }
+
   # ─── Operaciones ────────────────────────────────────────────────────────────
   type Query {
     me: User!
@@ -415,6 +492,9 @@ export const typeDefs = /* GraphQL */ `
 
     solarSimulation(id: ID!): SolarSimulation
     solarSimulations(supplyId: String!): [SolarSimulation!]!
+
+    optimizeSolarSizing(input: OptimizeSolarSizingInput!): SolarSizingResult!
+    optimizeSolarOrientation(input: OptimizeSolarOrientationInput!): SolarOrientationResult!
   }
 
   type Mutation {

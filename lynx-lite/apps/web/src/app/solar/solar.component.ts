@@ -3,6 +3,8 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { GraphqlService } from '../services/graphql.service';
 import { TopbarComponent } from '../shared/topbar.component';
+import { SolarSizingComponent } from './solar-sizing.component';
+import { SolarOrientationComponent } from './solar-orientation.component';
 
 interface SolarMonth {
   monthKey: string;
@@ -33,10 +35,17 @@ const SIMULATE = `mutation($i: SimulateSolarInput!) { simulateSolar(input: $i) {
 @Component({
   selector: 'app-solar',
   standalone: true,
-  imports: [CommonModule, FormsModule, TopbarComponent],
+  imports: [CommonModule, FormsModule, TopbarComponent, SolarSizingComponent, SolarOrientationComponent],
   template: `
     <app-topbar section="Autoconsumo solar (M06)" />
 
+    <div class="tabs">
+      <button [class.active]="tab === 'simular'" (click)="tab = 'simular'">Simular</button>
+      <button [class.active]="tab === 'dimensionar'" (click)="tab = 'dimensionar'">Dimensionar</button>
+      <button [class.active]="tab === 'orientar'" (click)="tab = 'orientar'">Orientar</button>
+    </div>
+
+    <ng-container *ngIf="tab === 'simular'">
     <div class="card panel">
       <div class="main">
         <label class="field">Suministro
@@ -94,9 +103,16 @@ const SIMULATE = `mutation($i: SimulateSolarInput!) { simulateSolar(input: $i) {
     <div class="card" *ngIf="!sim && !loading">
       <p class="muted">Introduce la ubicación y la potencia pico para simular el autoconsumo solar.</p>
     </div>
+    </ng-container>
+
+    <app-solar-sizing *ngIf="tab === 'dimensionar'" />
+    <app-solar-orientation *ngIf="tab === 'orientar'" />
   `,
   styles: [
     `
+      .tabs { max-width: 960px; margin: 8px auto 0; display: flex; gap: 4px; }
+      .tabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 14px; cursor: pointer; color: var(--muted); font-size: 0.9rem; box-shadow: none; }
+      .tabs button.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
       .t { margin: 0 0 12px; font-size: 1rem; }
       .muted { color: var(--muted); font-weight: 400; }
       .panel { display: flex; gap: 24px; align-items: flex-start; }
@@ -125,6 +141,7 @@ const SIMULATE = `mutation($i: SimulateSolarInput!) { simulateSolar(input: $i) {
   ],
 })
 export class SolarComponent implements OnInit {
+  tab: 'simular' | 'dimensionar' | 'orientar' = 'simular';
   supplies = [
     { cups: 'ES0031000000000002JN', supplyId: 'supply-20td', label: 'Pyme 2.0TD' },
     { cups: 'ES0031000000000001JN', supplyId: 'supply-30td', label: 'Industrial 3.0TD' },

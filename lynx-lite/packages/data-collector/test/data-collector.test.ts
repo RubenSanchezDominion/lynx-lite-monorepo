@@ -282,3 +282,37 @@ describe('TC-SOL — adaptador PVGIS', () => {
     expect(query).toMatchObject({ lat: '41.65', lon: '-0.88', peakpower: '10', loss: '14', angle: '35', aspect: '0' });
   });
 });
+
+// ─── M06 v2 — adaptador PVGIS seriescalc (serie horaria de año tipo) ────────────
+
+import { parsePvProductionSeries, fetchPvProductionSeries, type PvgisSeriesResponse } from '../src/index.js';
+
+describe('TC-SOL — adaptador PVGIS seriescalc', () => {
+  const raw: PvgisSeriesResponse = {
+    outputs: {
+      hourly: [
+        { time: '20210615:1010', P: 4200 }, // jun-15 10:00 → 4.2 kWh
+        { time: '20210615:1210', P: 5000 }, // jun-15 12:00 → 5.0 kWh
+        { time: '20210101:0010', P: 0 }, // ene-01 00:00 → 0
+      ],
+    },
+  };
+
+  it('parsePvProductionSeries parsea (mes,día,hora) de "YYYYMMDD:HHmm" y W→kWh', () => {
+    const s = parsePvProductionSeries(raw);
+    expect(s.hourly).toHaveLength(3);
+    expect(s.hourly[0]).toEqual({ month: 6, day: 15, hour: 10, kwh: 4.2 });
+    expect(s.hourly[1]).toEqual({ month: 6, day: 15, hour: 12, kwh: 5 });
+    expect(s.annual).toBeCloseTo(9.2, 6);
+  });
+
+  it('fetchPvProductionSeries llama a /api/v5_2/seriescalc con pvcalc=1', async () => {
+    const get = vi.fn().mockResolvedValue(raw);
+    const http: PvgisHttp = { get };
+    const s = await fetchPvProductionSeries(http, { lat: 41.65, lon: -0.88, kwp: 10, lossPct: 14, tilt: 35, azimuth: -90 });
+    expect(s.annual).toBeCloseTo(9.2, 6);
+    const [path, query] = get.mock.calls[0];
+    expect(path).toBe('/api/v5_2/seriescalc');
+    expect(query).toMatchObject({ peakpower: '10', angle: '35', aspect: '-90', pvcalc: '1' });
+  });
+});

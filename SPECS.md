@@ -3845,7 +3845,7 @@ demanda.
 
 | Fuente | Endpoint / origen | Dato obtenido | Uso en M06 |
 |--------|-------------------|---------------|------------|
-| **PVGIS** | `GET /api/v5_2/PVcalc` (`lat`, `lon`, `peakpower`, `loss`, `angle`, `aspect`) | Producción **mensual** (`outputs.monthly.fixed[].E_m`) y **anual** (`outputs.totals.fixed.E_y`) | Producción solar (repartida a horas en el servicio) |
+| **PVGIS** | `GET /api/v5_2/seriescalc` (`pvcalc=1`, `lat`, `lon`, `peakpower`, `loss`, `angle`, `aspect`) | Producción **horaria** de un **año meteorológico tipo** (`outputs.hourly[].P` en W → kWh) | Producción solar hora a hora (forma intradía dependiente de `tilt`/`azimuth`) |
 | InfluxDB | measurement `hourly_consumption` (`kwh`) | Curva horaria real del cliente | Consumo por hora (cruce `min`) |
 | InfluxDB | measurement `pvpc_price` | Precio horario PVPC | Componente del `eurPerKwh` (coste evitado) |
 | PostgreSQL | `TollRate` / `ChargeRate` (tipo `ENERGY`, vigentes) | Peaje y cargo de energía | Componentes del `eurPerKwh` (idéntico a M01/M04) |
@@ -3854,6 +3854,13 @@ demanda.
 > producción de PVGIS bajo demanda, cacheándola en `SolarSimulation` (Prisma), no en InfluxDB.
 >
 > **Rango**: últimos 12 meses de curva disponible (default). Si no hay curva → `NO_CONSUMPTION_DATA`.
+>
+> **`seriescalc` vs `PVcalc` (cambio v2)**: M06 v1 usaba `PVcalc` (agregado mensual `E_m`) y repartía cada
+> mes a horas con una **campana orto–ocaso agnóstica al azimut**. Eso impedía distinguir orientaciones por
+> su forma intradía (prerrequisito de §8.11). v2 usa **`seriescalc`** (serie horaria real de año tipo): la
+> producción ya **no se reparte, se lee**, y su forma **depende de `tilt`/`azimuth`**. Mejora la precisión
+> de todo M06 y habilita §8.10–§8.11. La serie de año tipo se **alinea** a la curva real del cliente por
+> posición de calendario (mismo `(mes, día, hora)` UTC; 29-feb reutiliza 28-feb).
 
 ### 8.2 Modelos Prisma
 
@@ -3898,28 +3905,30 @@ model SolarSimulation {
 ### 8.3 Esquema InfluxDB
 
 M06 **no define measurements nuevos**. Lee `hourly_consumption` (`kwh`) y `pvpc_price` (§3.3). La
-producción de PVGIS es agregado mensual que entra por GraphQL/cache Prisma, no serie en InfluxDB. La
-asignación de `period` (para casar peaje/cargo de energía) y la hora local (para repartir `E_m` por mes y
-por hora del día) usan el mismo calendario tarifario de la ingesta (§3.3).
+producción de PVGIS es serie horaria de año tipo que entra por GraphQL/cache Prisma, no serie en InfluxDB.
+La asignación de `period` (para casar peaje/cargo de energía) usa el mismo calendario tarifario de la
+ingesta (§3.3); el alineado producción↔consumo es por `(mes, día, hora)` UTC (§8.1, §8.4).
 
 ### 8.4 Algoritmo de cálculo — paso a paso
 
 El cálculo puro vive en `packages/solar-engine` (`simulateSolar`): sin I/O. El servicio obtiene la
-producción mensual de PVGIS, la **reparte a horas** (perfil solar), compone `eurPerKwh` (vía
-`SolarDataSource`, reutilizando M01) y persiste la `SolarSimulation`.
+**serie horaria** de PVGIS (`seriescalc`), la **alinea** con la curva real del cliente, compone
+`eurPerKwh` (vía `SolarDataSource`, reutilizando M01) y persiste la `SolarSimulation`.
 
 #### Responsabilidad del servicio / data source (construcción de inputs)
 
 | Campo del input | Cómo lo construye el servicio / data source |
 |-----------------|---------------------------------------------|
-| `hours[]` | por cada hora `[rangeStart, rangeEnd)`: `consumptionKwh` de `hourly_consumption`; `productionKwh` = `E_m[mes]` repartido con el perfil solar intradía (campana orto–ocaso, hora local Madrid); `eurPerKwh = pvpc_h + tollEnergy[p] + chargeEnergy[p]` (composición de M01) |
+| `hours[]` | por cada hora `[rangeStart, rangeEnd)`: `consumptionKwh` de `hourly_consumption`; `productionKwh` = valor de la serie `seriescalc` de **igual `(mes, día, hora)` UTC** (año tipo alineado); `eurPerKwh = pvpc_h + tollEnergy[p] + chargeEnergy[p]` (composición de M01) |
 | `surplusCompensationEurPerKwh` | precio de compensación simplificada de excedentes (mismo que M01, §3.4) |
 | `capexEur` | `kwp × costPerKwp` |
 
-> **Reparto `E_m` → horas (servicio)**: para cada día del mes, `E_m / díasDelMes` se distribuye entre las
-> horas de luz con un peso `w_h` (perfil tipo `max(0, sin(π·(h−orto)/(ocaso−orto)))` normalizado a 1 por
-> día). Determinista, dependiente solo del mes y la latitud (longitud del día). El engine recibe la
-> serie ya repartida.
+> **Alineado serie año-tipo → curva del cliente (servicio)**: `seriescalc` devuelve producción horaria de
+> un **año meteorológico tipo** (sin año natural real). Para cada hora de consumo se toma la producción de
+> la **misma `(mes, día, hora)` en UTC**. Reglas: `29-feb` reutiliza `28-feb`; horas del rango sin
+> producción correspondiente (rango parcial) simplemente no cruzan. La serie escala **linealmente con
+> `kwp`** (PVGIS calcula por kWp y multiplica por `peakpower`) → base de la optimización de §8.10. El
+> engine recibe la serie ya alineada (no reparte nada).
 
 > Validaciones **antes** de invocar al engine: `SOLAR_INVALID_PARAMS` (lat∉[−90,90], lon∉[−180,180],
 > `kwp ≤ 0`, `lossPct∉[0,100]`), `SUPPLY_NOT_FOUND`, `BACKFILL_*` (§3.5), `NO_CONSUMPTION_DATA` (sin
@@ -4109,10 +4118,12 @@ componentes.
 
 Buckets `month` con `production/self/surplus = Σ`; `months` ordenados por `monthStart`.
 
-#### TC-SOL-009 — Reparto E_m → horas (perfil solar) — Unit
+#### TC-SOL-009 — Alineado serie año-tipo → curva del cliente — Unit
 
-`E_m` repartido a las horas de un mes: `Σ producción_h del mes = E_m` (conserva la energía); producción
-**0 de noche** y máxima al mediodía. Verifica la campana y la conservación.
+*(Reemplaza al test de reparto por campana de v1.)* La serie `seriescalc` se alinea a la curva por
+`(mes, día, hora)` UTC: cada hora de consumo toma la producción de igual posición de calendario;
+`29-feb` reutiliza `28-feb`; producción **0 de noche** y máxima al mediodía. Verifica el mapeo y el caso
+bisiesto.
 
 #### TC-SOL-010 — simulateSolar calcula y persiste — Integration
 
@@ -4146,6 +4157,14 @@ maestros que M01/M04).
 `solarSimulations` filtra por supply; `solarSimulation(id)` inexistente → `null`. `USUARIO` sobre
 `simulateSolar` → `FORBIDDEN`; `ADMIN` de otro cliente → `FORBIDDEN` (reglas §2.2).
 
+#### TC-SOL-027 — La producción escala linealmente con `kwp` — Unit
+
+Serie alineada a `kwpRef` × 2 ⇒ `productionKwh` por hora se duplica. Base del barrido de §8.10 (una sola
+llamada PVGIS).
+
+> Los casos **§8.10 (dimensionado)** `TC-SOL-017…021` y **§8.11 (orientación)** `TC-SOL-022…026` se
+> definen en sus respectivas subsecciones.
+
 ### 8.7 Front (apps/web) — no normativo en lo visual
 
 > Como en M02–M05, el detalle visual no es contrato; el **flujo de datos** **sí** lo es.
@@ -4158,6 +4177,9 @@ maestros que M01/M04).
 - **Resultado**: producción anual + **gráfico mensual** (producción vs autoconsumo vs excedente),
   **ratios** (autoconsumo / cobertura), **ahorro anual €** y **payback** (años, o "no rentable" si
   `null`). Mensaje de que usa la **curva real** del cliente.
+
+> **M06 v2 — `/solar` es una vista con 3 pestañas**: **Simular** (este §8.7), **Dimensionar** (§8.10.6) y
+> **Orientar** (§8.11.6). Una sola entrada **Solar** en el topbar agrupa las tres herramientas del módulo.
 
 ### 8.8 Modo demo (para probar `/solar` sin DBs reales)
 
@@ -4203,8 +4225,268 @@ Mismo mecanismo de holders que M01–M05 (`runtime.ts`), arrancando con `npm run
 1. **Calibrar supuestos económicos** antes de dar cifras a cliente: €/kWp (default 1000) y el modelo de
    compensación de excedentes (PVPC medio, sin tope mensual). El payback es **orientativo**.
 2. **Migración Prisma + validación contra DBs reales** — transversal M01–M06 (`prisma migrate` sin ejecutar).
-3. **`seriescalc`** (serie PV horaria real de PVGIS) — mejora futura; exige ampliar el mock.
+3. **`seriescalc`** (serie PV horaria real de PVGIS) — **especificado en v2** (§8.1, §8.4): sustituye el
+   reparto por campana y es prerrequisito de §8.10–§8.11. Exige ampliar el mock (serie horaria
+   azimut-aware) y recalcular los valores esperados de los `TC-SOL`.
 4. **Sin test de front automatizado** para `/solar` (sin infra karma/jasmine; verificación manual).
+
+> **v2 — Optimizadores (§8.10 dimensionado, §8.11 orientación)**: especificados, **pendientes de
+> implementar**. Ambos envuelven `simulateSolar` sin nuevo modelo Prisma; §8.11 depende de la migración a
+> `seriescalc`.
+
+### 8.10 Optimización de dimensionado — kWp óptimo (v2)
+
+Hoy el usuario **teclea** el `kwp` y M06 calcula el resultado de una decisión que debe adivinar. §8.10
+invierte la pregunta: barre tamaños y devuelve la **curva de VAN vs kWp** con el óptimo marcado. Como
+M02, el cálculo puro vive en el engine (`packages/solar-engine`, función `optimizeSizing`); el servicio
+hace el I/O. **On-demand, no se persiste** (vista derivada, como M07): el usuario elige un `kwp` de la
+curva y luego lanza `simulateSolar` normal, que sí persiste.
+
+#### 8.10.0 Decisiones de diseño (premisas)
+
+> **El objetivo es el VAN, no el payback ni los kWh.** Maximizar kWh empuja a plantas enormes que vierten
+> el excedente a compensación (precio bajo); minimizar payback degenera a plantas diminutas. El óptimo
+> económico maximiza el **VAN**: el último panel rentable es el que aún se **autoconsume** (energía
+> evitada, cara) en vez de exportarse. `npv = Σ_{t=1..N} ahorro·(1−deg)^{t−1}·(1+esc)^{t−1} / (1+disc)^t
+> − CAPEX`, con `CAPEX = kwp × costPerKwp`. Defaults: `horizonYears=25`, `discountRatePct=4`,
+> `degradationPctPerYear=0.5`, `priceEscalationPctPerYear=0`. Con los tres ratios a 0 ⇒
+> `npv = ahorro·N − CAPEX`.
+
+> **Una sola llamada a PVGIS; el barrido es aritmética.** Como la producción **escala linealmente con
+> `kwp`** (§8.4, `seriescalc` por kWp × `peakpower`), se pide la serie **una vez** a un `kwpRef` y, por
+> cada candidato, se escala `productionKwh × (kwp / kwpRef)` y se reejecuta `simulateSolar` (cruce `min`
+> + ahorro). El barrido recorre `kwpMin..kwpMax` en pasos `kwpStep`. *(Se ignora el clipping del inversor
+> — la linealidad deja de valer si en el futuro se modela un ratio DC/AC; coherente con M06 v1.)*
+
+> **Restricciones explícitas o el óptimo no es realista.** `kwpMin`, `kwpMax` (límite de cubierta) y
+> `maxBudgetEur` (opcional) recortan el grid antes de optimizar. La salida es la **curva completa** (para
+> graficar la meseta) más `recommendedKwp = argmax(npv)` sujeto a restricciones. *Limitación conocida v1:
+> no se modela el tope mensual de compensación de excedentes (§8.9); sesga levemente a favor de plantas
+> grandes.*
+
+#### 8.10.1 Fuentes de datos
+
+Las mismas que §8.1 (`seriescalc` a `kwpRef` + `hourly_consumption` + `pvpc_price` + peajes/cargos). **Sin
+fuentes nuevas.**
+
+#### 8.10.2 Modelos Prisma
+
+**Ninguno.** §8.10 no persiste (como M07). El usuario materializa el kWp elegido vía `simulateSolar`.
+
+#### 8.10.3 Interfaz del solar-engine
+
+```typescript
+interface FinancialParams {
+  horizonYears?: number;              // def 25
+  discountRatePct?: number;           // def 4
+  degradationPctPerYear?: number;     // def 0.5
+  priceEscalationPctPerYear?: number; // def 0
+}
+
+interface SolarSizingInput {
+  baseHours: SolarHour[];             // serie alineada a kwpRef (productionKwh por hora)
+  kwpRef: number;
+  surplusCompensationEurPerKwh: number;
+  costPerKwp: number;                 // CAPEX = kwp × costPerKwp
+  kwpMin: number; kwpMax: number; kwpStep: number;
+  maxBudgetEur?: number;
+  financial?: FinancialParams;
+}
+
+interface SolarSizingPoint {
+  kwp: number;
+  annualProductionKwh: number; annualSelfConsumptionKwh: number; annualSurplusKwh: number;
+  selfConsumptionRatio: number; coverageRatio: number;
+  annualSavingEur: number; capexEur: number; npvEur: number; paybackYears: number | null;
+}
+
+interface SolarSizingResult {
+  curve: SolarSizingPoint[];          // un punto por kWp del grid
+  recommendedKwp: number; recommended: SolarSizingPoint;  // argmax(npvEur) bajo restricciones
+  horizonYears: number; discountRatePct: number;
+  degradationPctPerYear: number; priceEscalationPctPerYear: number;
+}
+
+function optimizeSizing(input: SolarSizingInput): SolarSizingResult;
+```
+
+Por candidato `kwp`: `hours = baseHours.map(h => ({ ...h, productionKwh: h.productionKwh * kwp / kwpRef }))`;
+`r = simulateSolar({ hours, surplusCompensationEurPerKwh, capexEur: kwp*costPerKwp })`; `npvEur` con la
+fórmula de §8.10.0. **Reutiliza `simulateSolar` íntegro** (cruce, ratios, payback).
+
+**Servicio** `optimizeSolarSizingForSupply(input, deps)` (`apps/api/src/services/solarService.ts`): una
+sola `dataSource.fetchProduction` a `kwpRef`, alinea la serie a la curva (§8.4), compone `eurPerKwh`
+reutilizando M01 (idéntico a la composición de `simulateSolarForSupply`), llama `optimizeSizing`. Misma
+autorización que `simulateSolar` (`assertCanWritePreInvoice`; `USUARIO` → `FORBIDDEN`). Errores: idénticos
+a §8.4 (`SOLAR_INVALID_PARAMS`, `NO_CONSUMPTION_DATA`, `PVGIS_UNAVAILABLE`, `BACKFILL_*`).
+
+#### 8.10.4 Esquema GraphQL
+
+```graphql
+input FinancialAssumptionsInput {
+  horizonYears: Int            # def 25
+  discountRatePct: Float       # def 4
+  degradationPctPerYear: Float # def 0.5
+  priceEscalationPctPerYear: Float # def 0
+}
+
+input OptimizeSolarSizingInput {
+  cups: String!  lat: Float!  lon: Float!
+  lossPct: Float  tilt: Float  azimuth: Float  costPerKwp: Float
+  kwpMin: Float!  kwpMax: Float!  kwpStep: Float
+  maxBudgetEur: Float
+  financial: FinancialAssumptionsInput
+}
+
+type SolarSizingPoint {
+  kwp: Float!
+  annualProductionKwh: Float!  annualSelfConsumptionKwh: Float!  annualSurplusKwh: Float!
+  selfConsumptionRatio: Float!  coverageRatio: Float!
+  annualSavingEur: Float!  capexEur: Float!  npvEur: Float!  paybackYears: Float
+}
+
+type SolarSizingResult {
+  curve: [SolarSizingPoint!]!
+  recommendedKwp: Float!  recommended: SolarSizingPoint!
+  horizonYears: Int!  discountRatePct: Float!
+  degradationPctPerYear: Float!  priceEscalationPctPerYear: Float!
+}
+
+extend type Query {
+  optimizeSolarSizing(input: OptimizeSolarSizingInput!): SolarSizingResult!
+}
+```
+
+#### 8.10.5 Casos de test
+
+- **TC-SOL-017 — VAN sin descuento — Unit**: `disc=deg=esc=0, N=25` ⇒ `npvEur = annualSavingEur·25 − capexEur`.
+- **TC-SOL-018 — VAN con descuento y degradación — Unit**: serie geométrica exacta (`disc=4`, `deg=0.5`).
+- **TC-SOL-019 — `recommendedKwp = argmax(npv)` — Unit**: curva sintética unimodal → óptimo en el pico.
+- **TC-SOL-020 — Restricciones recortan el grid — Unit**: `kwpMax`/`maxBudgetEur` limitan los candidatos evaluados.
+- **TC-SOL-021 — Una sola llamada a PVGIS + authz — Integration**: spy del data source ⇒ **1** `fetchProduction`; `USUARIO` → `FORBIDDEN`.
+
+#### 8.10.6 Front (apps/web) — no normativo en lo visual
+
+> Pestaña **Dimensionar** de `/solar`. Como §8.7, el detalle visual no es contrato; el **flujo de datos sí**.
+
+- **Entradas**: suministro + `lat`/`lon` + `kwpMin`/`kwpMax`/`kwpStep` + (inclinación, orientación,
+  pérdidas, €/kWp, `maxBudgetEur` opcional) + bloque de **supuestos financieros** (`horizonYears`,
+  `discountRatePct`, `degradationPctPerYear`, `priceEscalationPctPerYear`).
+- **Flujo**: botón **Dimensionar** → query `optimizeSolarSizing(input)`.
+- **Resultado**: KPIs (**kWp recomendado**, VAN, payback, autoconsumo %) + **gráfica de línea VAN vs kWp**
+  (Chart.js) con el óptimo (`recommendedKwp`) **resaltado** + tabla de la curva. Mensaje de que el VAN
+  depende de los supuestos (orientativo).
+
+### 8.11 Optimización de orientación e inclinación (v2)
+
+Sur maximiza kWh, pero **este-oeste casa con el perfil mañana+tarde** y autoconsume más €. §8.11 barre un
+conjunto **discreto** de orientaciones y las rankea por **VAN** (mismo cálculo que §8.10) a `kwp` fijo,
+recomendando la de mayor valor de autoconsumo. Como §8.10: cálculo en el engine (`optimizeOrientation`),
+I/O en el servicio.
+
+#### 8.11.0 Decisiones de diseño (premisas)
+
+> **Bloqueado por `seriescalc` (§8.4).** Cada `(tilt, azimuth)` produce una **forma horaria distinta**; la
+> campana agnóstica al azimut de v1 lo hacía imposible (todas las orientaciones se ordenaban por kWh
+> totales y siempre "ganaba" el sur). §8.11 **exige** la migración de §8.4.
+
+> **Maximiza valor € del autoconsumo, no kWh.** Candidatos por defecto: azimuts `{0=S, −45=SE, +45=SO,
+> −90=E, +90=O}` × tilts `{10, 20, 30, lat}`, más el especial **E-O a dos aguas** (suma de **dos** series,
+> Este y Oeste, a **medio `kwp`** cada una). Listas configurables vía input. Ranking por `npvEur` (§8.10).
+
+> **Una llamada PVGIS por orientación distinta (memo en la petición).** El servicio pide la serie
+> `seriescalc` una vez por cada `(tilt, azimuth)` distinto y la **memoiza** dentro de la petición; el
+> candidato **E-O a dos aguas reutiliza** las series Este/Oeste ya pedidas (0 llamadas extra si E y O
+> están en el grid). El barrido 2D es caro → grid **discreto**, no continuo; conviene un grid corto. El
+> ranking + VAN viven en un helper puro testeable (`optimizeOrientation`). *(El autoconsumo NO es aditivo
+> entre simulaciones independientes — la dos-aguas suma la **producción** Este+Oeste ANTES del cruce
+> `min`, por eso usa el camino del engine y no `simulateSolarForSupply`.)*
+
+#### 8.11.1 Fuentes de datos
+
+Las mismas que §8.1, una serie `seriescalc` **por orientación distinta** `(tilt, azimuth)`. **Sin fuentes nuevas.**
+
+#### 8.11.2 Modelos Prisma
+
+**Ninguno nuevo.** El optimizador de orientación **no persiste**: es una vista derivada on-demand (como
+§8.10 y M07). El ranking se calcula y se devuelve sin escribir en `SolarSimulation`.
+
+#### 8.11.3 Interfaz del solar-engine
+
+```typescript
+interface OrientationCandidate { tilt: number; azimuth: number; label?: string; }
+
+interface SolarOrientationInput {
+  perCandidate: Array<{ candidate: OrientationCandidate; hours: SolarHour[] }>; // hours a kwp fijo
+  surplusCompensationEurPerKwh: number;
+  capexEur: number;
+  financial?: FinancialParams;
+}
+
+interface SolarOrientationPoint extends OrientationCandidate {
+  annualProductionKwh: number; annualSelfConsumptionKwh: number; selfConsumptionRatio: number;
+  annualSavingEur: number; npvEur: number;
+}
+
+interface SolarOrientationResult {
+  candidates: SolarOrientationPoint[];   // todos los evaluados
+  recommended: SolarOrientationPoint;    // argmax(npvEur)
+}
+
+function optimizeOrientation(input: SolarOrientationInput): SolarOrientationResult;
+```
+
+**Servicio** `optimizeSolarOrientationForSupply(input, deps)`: compone consumo + `eurPerKwh` una vez
+(reutilizando M01); pide `dataSource.fetchProduction` por cada `(tilt, azimuth)` distinto con **memo en
+la petición**; construye `hours` por candidato a `kwp` fijo; para E-O a dos aguas suma `0.5·serieE +
+0.5·serieO` (a `tilts[0]`) **antes** del cruce `min`. Rankea con `optimizeOrientation`. Misma
+autorización (`assertCanWritePreInvoice`, USUARIO→FORBIDDEN) y errores que §8.10. Defaults: tilts
+`{10,20,30,round(lat)}`, azimuts `{0,−45,45,−90,90}`, `includeEastWestSplit=true`.
+
+#### 8.11.4 Esquema GraphQL
+
+```graphql
+input OptimizeSolarOrientationInput {
+  cups: String!  lat: Float!  lon: Float!  kwp: Float!
+  lossPct: Float  costPerKwp: Float
+  tilts: [Float!]  azimuths: [Float!]  includeEastWestSplit: Boolean  # def true
+  financial: FinancialAssumptionsInput
+}
+
+type SolarOrientationPoint {
+  tilt: Float!  azimuth: Float!  label: String
+  annualProductionKwh: Float!  annualSelfConsumptionKwh: Float!  selfConsumptionRatio: Float!
+  annualSavingEur: Float!  npvEur: Float!
+}
+
+type SolarOrientationResult {
+  candidates: [SolarOrientationPoint!]!
+  recommended: SolarOrientationPoint!
+}
+
+extend type Query {
+  optimizeSolarOrientation(input: OptimizeSolarOrientationInput!): SolarOrientationResult!
+}
+```
+
+#### 8.11.5 Casos de test
+
+- **TC-SOL-022 — E-O vence con consumo bimodal — Integration**: consumo mañana+tarde + mock `seriescalc` azimut-aware ⇒ `recommended.label = "E-O a dos aguas"`.
+- **TC-SOL-023 — Sur vence con consumo centrado al mediodía — Unit**: perfil diurno ⇒ `recommended` es Sur.
+- **TC-SOL-024 — E-O a dos aguas suma producción E+O — Integration**: con consumo bimodal, la dos-aguas autoconsume **más** que el Este puro y que el Oeste puro (prueba la suma de producción antes del cruce).
+- **TC-SOL-025 — Una llamada PVGIS por orientación distinta — Integration**: `tilts=[20], azimuths=[0,−90,90]` + split ⇒ **3** `fetchProduction` (la dos-aguas reutiliza E/O ya pedidos vía memo).
+- **TC-SOL-026 — `recommended = argmax(npv)` — Unit**: entre candidatos sintéticos, gana el de mayor `npvEur`.
+
+#### 8.11.6 Front (apps/web) — no normativo en lo visual
+
+> Pestaña **Orientar** de `/solar`. Como §8.7, el detalle visual no es contrato; el **flujo de datos sí**.
+
+- **Entradas**: suministro + `lat`/`lon` + `kwp` + (pérdidas, €/kWp, `includeEastWestSplit`) + supuestos
+  financieros (como §8.10.6).
+- **Flujo**: botón **Orientar** → query `optimizeSolarOrientation(input)`.
+- **Resultado**: KPI de la **orientación recomendada** (etiqueta o `tilt°/azimut°` + autoconsumo % + VAN)
+  + **gráfica de barras** (Chart.js) de candidatos por VAN con el recomendado **resaltado** + tabla
+  (orientación · autoconsumo % · ahorro €/año · VAN), fila recomendada destacada.
 
 ---
 

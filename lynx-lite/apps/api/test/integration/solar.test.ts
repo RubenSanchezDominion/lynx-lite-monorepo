@@ -15,6 +15,21 @@ vi.mock('../../src/lib/prisma.js', () => ({ prisma: mockPrisma }));
 import { buildServer, runOp, errorCode } from '../harness.js';
 import { setSolarDataSource } from '../../src/services/runtime.js';
 import type { SolarDataSource, RawSolarHour } from '../../src/services/solarData.js';
+import type { PvProductionSeries } from '@lynx-lite/data-collector';
+
+// Serie horaria (año tipo) para junio-15 con pico intradía sesgado por azimut: Este (−90) adelanta el
+// pico a la mañana, Oeste (+90) a la tarde, Sur (0) al mediodía. Amplitud > consumo para que una sola
+// orientación rebose (excedente) y la E-O a dos aguas reparta mejor.
+function seriesFor(azimuth: number): PvProductionSeries {
+  const peak = 12 + azimuth / 22.5;
+  const hourly: PvProductionSeries['hourly'] = [];
+  for (let h = 0; h < 24; h++) {
+    const d = (h - peak) / 4;
+    const kwh = Math.abs(d) < 1 ? Math.cos((d * Math.PI) / 2) * 20 : 0;
+    hourly.push({ month: 6, day: 15, hour: h, kwh });
+  }
+  return { hourly, annual: hourly.reduce((a, x) => a + x.kwh, 0) };
+}
 
 const server = buildServer();
 const DOMINION = { id: 'dom', role: 'DOMINION' as const };
@@ -24,7 +39,7 @@ const ADMIN_OTHER = { id: 'a2', role: 'ADMIN' as const, clientId: 'client-B' };
 let consumption: RawSolarHour[];
 const dataSource: SolarDataSource = {
   loadConsumption: vi.fn(async () => consumption),
-  fetchProduction: vi.fn(async () => ({ monthly: new Array(12).fill(500), annual: 6000 })),
+  fetchProduction: vi.fn(async (p: { azimuth?: number }) => seriesFor(p?.azimuth ?? 0)),
 };
 setSolarDataSource(dataSource);
 
@@ -67,7 +82,7 @@ beforeEach(() => {
   }
   (dataSource.loadConsumption as ReturnType<typeof vi.fn>).mockClear();
   (dataSource.fetchProduction as ReturnType<typeof vi.fn>).mockClear();
-  (dataSource.fetchProduction as ReturnType<typeof vi.fn>).mockResolvedValue({ monthly: new Array(12).fill(500), annual: 6000 });
+  (dataSource.fetchProduction as ReturnType<typeof vi.fn>).mockImplementation(async (p: { azimuth?: number }) => seriesFor(p?.azimuth ?? 0));
   consumption = defaultConsumption();
 });
 
@@ -178,5 +193,105 @@ describe('TC-SOL-016 — consultas y autorización', () => {
     mockPrisma.supply.findUnique.mockResolvedValue({ id: 's1', clientId: 'client-A' });
     const r = await runOp(server, LIST, { variables: { s: 's1' }, user: ADMIN_OTHER });
     expect(errorCode(r)).toBe('FORBIDDEN');
+  });
+});
+
+// ─── §8.10 / §8.11 — Optimizadores (M06 v2) ─────────────────────────────────────
+
+// Consumo BIMODAL (mañana + tarde, valle al mediodía) sobre junio-15: hace que la orientación E-O a
+// dos aguas autoconsuma más que cualquier orientación única.
+function bimodal(): RawSolarHour[] {
+  const out: RawSolarHour[] = [];
+  for (let h = 0; h < 24; h++) {
+    let kwh = 0;
+    if (h >= 8 && h < 12) kwh = 10; // mañana
+    else if (h >= 12 && h < 16) kwh = 1; // valle mediodía
+    else if (h >= 16 && h < 20) kwh = 10; // tarde
+    out.push({ ts: `2025-06-15T${String(h).padStart(2, '0')}:00:00.000Z`, kwh, pvpcEurKwh: 0.1, gap: false });
+  }
+  return out;
+}
+
+const SIZE = `query($i: OptimizeSolarSizingInput!) { optimizeSolarSizing(input: $i) { recommendedKwp curve { kwp npvEur annualProductionKwh } } }`;
+const ORIENT = `query($i: OptimizeSolarOrientationInput!) { optimizeSolarOrientation(input: $i) { recommended { tilt azimuth label } candidates { tilt azimuth label annualSelfConsumptionKwh } } }`;
+
+describe('TC-SOL-021 — optimizeSolarSizing: 1 sola llamada PVGIS + autorización', () => {
+  it('una llamada a fetchProduction y devuelve la curva', async () => {
+    setupSupply();
+    setupRates();
+    const r = await runOp(server, SIZE, {
+      variables: { i: { cups: 'ES_CUPS', lat: 41.65, lon: -0.88, kwpMin: 5, kwpMax: 20, kwpStep: 5 } },
+      user: DOMINION,
+    });
+    expect(r.errors).toBeUndefined();
+    expect(dataSource.fetchProduction).toHaveBeenCalledTimes(1); // escalado lineal: una sola serie
+    expect((r.data?.optimizeSolarSizing as { curve: unknown[] }).curve.length).toBe(4); // 5,10,15,20
+  });
+  it('USUARIO → FORBIDDEN sin llamar a PVGIS', async () => {
+    setupSupply();
+    const r = await runOp(server, SIZE, {
+      variables: { i: { cups: 'ES_CUPS', lat: 41.65, lon: -0.88, kwpMin: 5, kwpMax: 20 } },
+      user: USUARIO_S1,
+    });
+    expect(errorCode(r)).toBe('FORBIDDEN');
+    expect(dataSource.fetchProduction).not.toHaveBeenCalled();
+  });
+  it('maxBudgetEur: null (como envía el front) NO vacía la curva ni anula recommended', async () => {
+    setupSupply();
+    setupRates();
+    const r = await runOp(server, SIZE, {
+      variables: { i: { cups: 'ES_CUPS', lat: 41.65, lon: -0.88, kwpMin: 5, kwpMax: 20, kwpStep: 5, maxBudgetEur: null } },
+      user: DOMINION,
+    });
+    expect(r.errors).toBeUndefined();
+    const data = r.data?.optimizeSolarSizing as { curve: unknown[]; recommendedKwp: number };
+    expect(data.curve.length).toBe(4);
+    expect(data.recommendedKwp).toBeGreaterThan(0);
+  });
+});
+
+describe('TC-SOL-022 — optimizeSolarOrientation: E-O gana con consumo bimodal', () => {
+  it('recomienda E-O a dos aguas frente a Sur/Este/Oeste', async () => {
+    setupSupply();
+    setupRates();
+    consumption = bimodal();
+    const r = await runOp(server, ORIENT, {
+      variables: { i: { cups: 'ES_CUPS', lat: 41.65, lon: -0.88, kwp: 10 } },
+      user: DOMINION,
+    });
+    expect(r.errors).toBeUndefined();
+    expect((r.data?.optimizeSolarOrientation as { recommended: { label: string } }).recommended.label).toBe('E-O a dos aguas');
+  });
+});
+
+describe('TC-SOL-024 — E-O a dos aguas suma producción E+O (autoconsumo > cada una)', () => {
+  it('la dos-aguas autoconsume más que el Este puro y que el Oeste puro', async () => {
+    setupSupply();
+    setupRates();
+    consumption = bimodal();
+    const r = await runOp(server, ORIENT, {
+      variables: { i: { cups: 'ES_CUPS', lat: 41.65, lon: -0.88, kwp: 10 } },
+      user: DOMINION,
+    });
+    type Cand = { azimuth: number; label: string | null; annualSelfConsumptionKwh: number };
+    const cands = (r.data?.optimizeSolarOrientation as { candidates: Cand[] }).candidates;
+    const split = cands.find(c => c.label === 'E-O a dos aguas')!;
+    const east = cands.find(c => c.azimuth === -90)!;
+    const west = cands.find(c => c.azimuth === 90)!;
+    expect(split.annualSelfConsumptionKwh).toBeGreaterThan(east.annualSelfConsumptionKwh);
+    expect(split.annualSelfConsumptionKwh).toBeGreaterThan(west.annualSelfConsumptionKwh);
+  });
+});
+
+describe('TC-SOL-025 — una llamada PVGIS por orientación distinta (split reutiliza E/O)', () => {
+  it('tilts=[20], azimuths=[0,-90,90] + split → 3 llamadas (no 4)', async () => {
+    setupSupply();
+    setupRates();
+    const r = await runOp(server, ORIENT, {
+      variables: { i: { cups: 'ES_CUPS', lat: 41.65, lon: -0.88, kwp: 10, tilts: [20], azimuths: [0, -90, 90], includeEastWestSplit: true } },
+      user: DOMINION,
+    });
+    expect(r.errors).toBeUndefined();
+    expect(dataSource.fetchProduction).toHaveBeenCalledTimes(3); // (20,0)(20,-90)(20,90); split reusa
   });
 });

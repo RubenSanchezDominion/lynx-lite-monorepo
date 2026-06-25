@@ -38,11 +38,16 @@ export { EMISSION_COEFFICIENTS } from './emissionCoefficients.js';
 export {
   parsePvProduction,
   fetchPvProduction,
+  parsePvProductionSeries,
+  fetchPvProductionSeries,
   type PvgisMonth,
   type PvgisResponse,
   type PvProduction,
   type PvProductionParams,
   type PvgisHttp,
+  type PvHourly,
+  type PvProductionSeries,
+  type PvgisSeriesResponse,
 } from './pvgis.js';
 
 export {

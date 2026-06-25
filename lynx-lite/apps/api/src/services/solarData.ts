@@ -1,5 +1,5 @@
 import type { QueryApi } from '@influxdata/influxdb-client';
-import { fetchPvProduction, type PvgisHttp, type PvProduction } from '@lynx-lite/data-collector';
+import { fetchPvProductionSeries, type PvgisHttp, type PvProductionSeries } from '@lynx-lite/data-collector';
 
 const bucket = process.env.INFLUXDB_BUCKET ?? 'lynx-lite';
 
@@ -24,8 +24,8 @@ export interface SolarProductionParams {
 export interface SolarDataSource {
   // Curva de consumo + PVPC sobre [from, to).
   loadConsumption(cups: string, from: Date, to: Date): Promise<RawSolarHour[]>;
-  // Producción mensual/anual de PVGIS (lanza si PVGIS no responde).
-  fetchProduction(params: SolarProductionParams): Promise<PvProduction>;
+  // Serie horaria de producción de un año tipo (PVGIS seriescalc). Lanza si PVGIS no responde.
+  fetchProduction(params: SolarProductionParams): Promise<PvProductionSeries>;
 }
 
 // ─── Implementación real: InfluxDB (consumo + PVPC) + PVGIS (producción) ────────
@@ -63,8 +63,8 @@ export function makeInfluxSolarDataSource(queryApi: QueryApi, pvgis: PvgisHttp):
       }));
     },
 
-    async fetchProduction(params): Promise<PvProduction> {
-      return fetchPvProduction(pvgis, params);
+    async fetchProduction(params): Promise<PvProductionSeries> {
+      return fetchPvProductionSeries(pvgis, params);
     },
   };
 }
