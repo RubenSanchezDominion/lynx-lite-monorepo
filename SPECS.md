@@ -4520,11 +4520,21 @@ M07 **no necesita data source demo propio**: reutiliza `makeDemoDataSource()` ya
   - **CUPS vs CUPS** (2.0TD vs 3.0TD, mismo periodo): `sameTariff=false`; el front oculta el desglose
     P1–P6 y muestra la comparación **€/kWh medio** — aquí es donde la demo luce.
 
-### 9.9 Estado de implementación
+### 9.9 Estado de implementación (actualizado 2026-06-25)
 
-**ESPECIFICADO — pendiente de implementación.** Esta pasada deja únicamente la especificación (§9). No se
-ha tocado código de `apps/api` ni `apps/web`. La implementación (servicio + resolver + typeDefs + front
-con Chart.js + tests `TC-CMP-001..012`) se abordará en una segunda fase, sobre esta spec ya validada.
+**IMPLEMENTADO — SIN TESTS.** El slice de código existe y está commiteado (`fb47d45`, 17-jun):
+
+- ✅ `apps/api` — `services/comparisonService.ts` (`computeComparison`, invoca `computePreInvoice` 2× y
+  calcula deltas), `resolvers/comparison.ts` (`calculateComparison`), `typeDefs.ts` (`ComparisonInput`,
+  `ComparisonDelta`, `ComparisonResult`). Reutiliza el `PreInvoiceDataSource` ya inyectado (§9.0bis).
+- ✅ `apps/web` — `comparison/comparison.component.ts` (ruta + gráficas).
+
+**PENDIENTE (deuda consciente):**
+
+1. ⚠️ **Tests `TC-CMP-001..012` NO escritos** — M07 está implementado pero **sin verificar**. Es la deuda
+   de test más visible del repo (el resto de módulos sí tienen unit+integración).
+2. **Migración Prisma + validación contra DBs reales** — transversal M01–M07 (sin `prisma migrate`).
+3. **Sin test de front automatizado** ni E2E (transversal).
 
 ---
 
