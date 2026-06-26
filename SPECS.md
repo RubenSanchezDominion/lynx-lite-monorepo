@@ -13,9 +13,10 @@
 5. [M03 — Alertas y detección de anomalías](#5-m03--alertas-y-detección-de-anomalías)
 6. [M04 — KPI de coste energético por unidad producida](#6-m04--kpi-de-coste-energético-por-unidad-producida)
 7. [M05 — Huella de carbono](#7-m05--huella-de-carbono)
-8. [M06 — Simulación de autoconsumo solar](#8-m06--simulación-de-autoconsumo-solar)
+8. [M06 — Simulación de autoconsumo solar](#8-m06--simulación-de-autoconsumo-solar) · incl. [M06.3 — Producción FV real medida (ingesta de inversor)](#812-producción-fv-real-medida--ingesta-de-inversor-m063)
 9. [M07 — Comparativa de suministros](#9-m07--comparativa-de-suministros)
 10. [Convenciones de test](#10-convenciones-de-test)
+11. [Dashboard de inicio (panel transversal)](#11-dashboard-de-inicio-panel-transversal)
 
 ---
 
@@ -4488,6 +4489,325 @@ extend type Query {
   + **gráfica de barras** (Chart.js) de candidatos por VAN con el recomendado **resaltado** + tabla
   (orientación · autoconsumo % · ahorro €/año · VAN), fila recomendada destacada.
 
+### 8.12 Producción FV real medida — ingesta de inversor (M06.3)
+
+M06 §8.7 simula la producción **estimada** (PVGIS) de una planta que el cliente **aún no tiene**. §8.12
+es la cara complementaria: el cliente **ya tiene FV instalada** y sube el histórico de generación que
+exporta su inversor (CSV/XLSX). Con esa serie **medida real** LYNX hace lo que ningún competidor sin
+hardware puede, porque requiere **dos** curvas reales a la vez:
+
+1. **Autoconsumo/excedentes/ahorro REALES** — cruza la generación medida con la curva de consumo real
+   (`hourly_consumption`, M01), reutilizando **íntegro** el engine `simulateSolar` (§8.4). El único cambio
+   frente a §8.7 es el **origen** de `productionKwh`: medido en vez de estimado por PVGIS.
+2. **Performance check** — compara la generación medida con la que PVGIS (§8.1) predice para esa planta:
+   **PR** (performance ratio) y **kWh/kWp**, detectando **infraproducción** (suciedad, sombras, string
+   caído, derating). Cierra el bucle de M06: de "¿qué instalo?" a "lo instalado, ¿rinde?".
+
+> **Relación con §8.7**: M06.3 **no** sustituye la simulación; la complementa. `simulateSolar` se
+> reutiliza tal cual (cruce `min`, ratios, ahorro). El performance es un engine **nuevo y puro**
+> (`comparePerformance`), no toca el modelo económico.
+
+#### 8.12.0 Decisiones de diseño (premisas de este módulo)
+
+> **El formato de export es VARIABLE — mapeador universal, no un adapter por marca.** Huawei FusionSolar,
+> Fronius, SolarEdge, Enphase, Victron, Solis… cada portal exporta distinto (columnas, idioma, huso,
+> kW vs kWh, acumulado vs intervalo, coma decimal, `;`, filas de metadatos arriba, layout largo vs
+> pivotado por inversor). **No se programa una clase por marca**: hay un único `applyMapping(rawRows,
+> mapping)` parametrizado por un **objeto `mapping`** (qué columna es tiempo, cuál es valor, unidad,
+> tipo de valor, huso, escala, filas a saltar). La "estrategia por marca" son **datos (un preset)**, no
+> código. Una marca desconocida se cubre confirmando el mapeo en el front; un mapeo que funciona se guarda
+> como **preset** reutilizable. Semillas: Huawei/Fronius/SolarEdge/Enphase/Victron/Solis + genérico.
+
+> **El backend parsea; la web asiste.** El navegador sube el fichero **crudo** y muestra preview + un
+> formulario para **confirmar/corregir** el mapeo auto-detectado; la normalización dura (huso→UTC con
+> DST, kW→kWh, acumulado→diferencia, 15min→hora, coma decimal) y la validación servidora viven en
+> `packages/inverter-ingest` (puro, testeable, reutilizable si mañana hay ingesta por API del inversor).
+> El front **no** normaliza: solo propone columnas leyendo unas filas para la vista previa.
+
+> **Tres conversiones donde se pierde dinero si fallan** (independientes de la marca, núcleo de los tests):
+> 1. **Huso/DST**: el portal da hora **local** (p. ej. Europe/Madrid); hay que pasar a **UTC** para alinear
+>    con `hourly_consumption`. Un desfase de 1–2 h destroza el cálculo de autoconsumo y miente con
+>    seguridad. 2. **kW→kWh**: si la columna es **potencia** instantánea (`AC Power`/`Pac`/kW) se **integra**
+>    por el paso real (`kW × Δt_horas`), no se asume 1 h. Si es **acumulado** (`Total Yield`, monótono;
+>    `Daily Yield`, con reset diario) se **diferencia**. Si ya es **energía de intervalo** (kWh por fila)
+>    se toma directa. 3. **15 min → hora**: se agrega a la hora entera (suma de energía) para casar con la
+>    curva Datadis. Multi-inversor en un fichero (layout pivotado) se **suma** por timestamp.
+
+> **Fase 1: análisis al vuelo, sin persistir (como el resto del demo sin Influx).** La operación de
+> subida **parsea + valida + cruza + compara** y devuelve `{ report, realSolar, performance }` en una sola
+> llamada, **sin escribir**. Coherente con "los datos del demo se consideran ya disponibles" (§8.8): el
+> resto de data sources solo leen. La persistencia real (measurement `pv_production_measured` en InfluxDB,
+> gemelo de `hourly_consumption`) queda **especificada y escrita pero latente** en `makeInfluxInverterDataSource`,
+> a la espera de que se monte InfluxDB — exactamente como `makeInfluxSolarDataSource` ya convive con el demo.
+
+#### 8.12.1 Fuentes de datos
+
+| Fuente | Origen | Dato obtenido | Uso en M06.3 |
+|--------|--------|---------------|--------------|
+| **Fichero del usuario** | CSV/XLSX export del inversor (subida GraphQL) | Serie de generación medida (potencia o energía, 1 o N inversores) | Producción real hora a hora (tras normalizar) |
+| InfluxDB | `hourly_consumption` (`kwh`) | Curva real del cliente | Consumo por hora (cruce `min`, reutiliza M01) |
+| InfluxDB | `pvpc_price` | Precio horario PVPC | Componente de `eurPerKwh` (coste evitado) |
+| PostgreSQL | `TollRate`/`ChargeRate` (ENERGY, vigentes) | Peaje y cargo de energía | Componentes de `eurPerKwh` (idéntico a M01/M06) |
+| **PVGIS** | `seriescalc` (§8.1) | Producción horaria de año tipo | Baseline esperado para el **performance** (PR, kWh/kWp) |
+
+> **Sin ingesta nueva activa en InfluxDB en Fase 1**: la serie medida entra por el fichero y se consume al
+> vuelo. El measurement `pv_production_measured` se define aquí pero **no se escribe** hasta que exista la
+> infra (deuda consciente, igual que las migraciones Prisma de M01–M06).
+
+#### 8.12.2 Modelos Prisma
+
+**Ninguno nuevo en Fase 1.** §8.12 no persiste (como §8.10/§8.11/M07). *(Futuro: una tabla `InverterImport`
+con metadatos de la subida + puntero a la serie en Influx, cuando se active la persistencia.)*
+
+#### 8.12.3 Mapeador universal — `packages/inverter-ingest` (puro)
+
+```typescript
+// ─── Mapping: qué representa cada columna del fichero crudo ───────────────────
+type ValueKind = 'ENERGY_INTERVAL' | 'POWER' | 'CUMULATIVE_TOTAL' | 'CUMULATIVE_DAILY';
+
+interface ColumnMapping {
+  timeColumn: string;          // nombre o índice de la columna de tiempo
+  timeFormat?: string;         // formato detectado (p. ej. "DD/MM/YYYY HH:mm", "ISO", "EPOCH_S")
+  valueColumns: string[];      // 1..N columnas de valor (N inversores → se suman por timestamp)
+  valueKind: ValueKind;        // energía de intervalo | potencia | acumulado total | acumulado diario
+  unitScaleToKwh: number;      // factor a kWh: kWh→1, Wh→0.001, MWh→1000 (para energía); para potencia, a kW
+  decimal: ',' | '.';          // separador decimal del fichero
+  timezone: string;            // IANA, p. ej. "Europe/Madrid" (huso del export; se pasa a UTC)
+  skipRows: number;            // filas de metadatos de planta antes de la cabecera
+}
+
+interface MappingProposal {
+  mapping: ColumnMapping;      // propuesta auto-detectada (editable en el front)
+  confidence: number;          // 0..1 por columna detectada (heurística)
+  presetMatched?: string;      // nombre del preset semilla que casó, si alguno
+  warnings: string[];          // ambigüedades (p. ej. fecha día/mes indistinguible)
+}
+
+interface CanonicalPoint { ts: string; kwh: number; }   // ts ISO UTC, energía de la HORA
+
+// Heurística de detección sobre las primeras filas (propone, no impone).
+function detectMapping(rawRows: string[][], presets: InverterPreset[]): MappingProposal;
+// Normalización dura → serie horaria canónica en UTC. Aquí viven huso/DST, kW→kWh, acumulado→diff, 15min→hora.
+function applyMapping(rawRows: string[][], mapping: ColumnMapping): CanonicalPoint[];
+```
+
+> **`applyMapping` — orden de operaciones** (determinista, puro): (1) saltar `skipRows`; (2) parsear cada
+> fila: tiempo→UTC (con `timezone`+DST), valores→número (con `decimal`); (3) por valor: si `POWER`,
+> integrar `valor·unitScaleToKwh·Δt_horas` (Δt del intervalo entre muestras); si `CUMULATIVE_*`,
+> diferenciar respecto a la muestra previa (`CUMULATIVE_DAILY` resetea a 0 en cada día local; ignora
+> diferencias negativas del reset); si `ENERGY_INTERVAL`, `valor·unitScaleToKwh`; (4) **sumar** las N
+> `valueColumns` del mismo timestamp (multi-inversor); (5) **agregar a hora entera** (Σ energía del bucket
+> horario UTC). Salida ordenada por `ts`.
+
+#### 8.12.4 Validación — `validate.ts` (puro)
+
+```typescript
+interface ValidationReport {
+  rowsParsed: number; rowsSkipped: number;
+  rangeStart: string; rangeEnd: string;        // ISO UTC
+  detectedUnit: ValueKind; detectedTimezone: string;
+  hourGaps: number;                            // horas sin dato dentro del rango
+  duplicates: number;                          // timestamps repetidos colapsados
+  negativeDropped: number;                     // diffs negativas descartadas (resets de acumulado)
+  coveragePct: number;                         // % horas con dato sobre el rango
+  consumptionOverlapPct: number;               // % del rango que solapa con hourly_consumption (cruce útil)
+  warnings: string[];
+}
+function validate(points: CanonicalPoint[], mapping: ColumnMapping, consumptionRange?: {from:string;to:string}): ValidationReport;
+```
+
+> No se ingiere a ciegas: el front muestra este informe **antes** de dar por buena la subida. Si
+> `consumptionOverlapPct = 0` → no hay tramo común para cruzar (warning, no error).
+
+#### 8.12.5 Engine de performance — `performance.ts` (puro)
+
+```typescript
+interface PerformanceInput {
+  measured: CanonicalPoint[];      // serie real (kWh/hora UTC)
+  expected: CanonicalPoint[];      // serie PVGIS alineada (kWh/hora UTC)
+  kwp: number;                     // potencia pico instalada (para kWh/kWp)
+}
+interface MonthPerformance { key: string; measuredKwh: number; expectedKwh: number; ratio: number; }
+interface PerformanceResult {
+  measuredKwh: number; expectedKwh: number;
+  performanceRatio: number;        // measured / expected (1 = según diseño; <1 infraproduce)
+  specificYieldKwhPerKwp: number;  // measuredKwh / kwp (anualizado al rango)
+  months: MonthPerformance[];      // desviación mensual (para localizar cuándo cae)
+  underperforming: boolean;        // performanceRatio < umbral (def 0.85)
+  underperformancePct: number;     // max(0, 1 − performanceRatio)·100
+}
+function comparePerformance(input: PerformanceInput): PerformanceResult;
+```
+
+> **PR sin redondeo intermedio** (criterio §8.4). El baseline PVGIS se alinea por `(mes, día, hora)` UTC
+> igual que §8.4; las horas medidas sin baseline correspondiente no entran en el ratio. Umbral de
+> infraproducción configurable (def 0.85). *Limitación v1: no corrige por irradiación real del periodo
+> (PVGIS es año tipo) — el PR es **indicativo de tendencia**, no certificación IEC 61724.*
+
+#### 8.12.6 Esquema GraphQL
+
+```graphql
+enum InverterValueKind { ENERGY_INTERVAL POWER CUMULATIVE_TOTAL CUMULATIVE_DAILY }
+
+input InverterColumnMappingInput {
+  timeColumn: String!  timeFormat: String
+  valueColumns: [String!]!  valueKind: InverterValueKind!
+  unitScaleToKwh: Float!  decimal: String!  timezone: String!  skipRows: Int!
+}
+
+# Propuesta de mapeo a partir de una muestra de filas crudas (asistente del front).
+input DetectInverterMappingInput { cups: String!  sampleRows: [[String!]!]! }
+
+type InverterMappingProposal {
+  mapping: InverterColumnMapping!  confidence: Float!  presetMatched: String  warnings: [String!]!
+}
+type InverterColumnMapping {
+  timeColumn: String!  timeFormat: String  valueColumns: [String!]!
+  valueKind: InverterValueKind!  unitScaleToKwh: Float!  decimal: String!  timezone: String!  skipRows: Int!
+}
+
+# Análisis al vuelo (Fase 1: NO persiste). Recibe las filas crudas + el mapeo confirmado.
+# lat/lon/lossPct/tilt/azimuth alimentan el baseline PVGIS del performance (como SimulateSolarInput).
+input AnalyzeInverterUploadInput {
+  cups: String!  rows: [[String!]!]!  mapping: InverterColumnMappingInput!
+  kwp: Float!  lat: Float!  lon: Float!
+  lossPct: Float  tilt: Float  azimuth: Float
+  costPerKwp: Float  underperformanceThreshold: Float   # def 0.85
+}
+
+type InverterValidationReport {
+  rowsParsed: Int!  rowsSkipped: Int!  rangeStart: String!  rangeEnd: String!
+  detectedUnit: InverterValueKind!  detectedTimezone: String!
+  hourGaps: Int!  duplicates: Int!  negativeDropped: Int!
+  coveragePct: Float!  consumptionOverlapPct: Float!  warnings: [String!]!
+}
+type InverterMonthPerformance { key: String!  measuredKwh: Float!  expectedKwh: Float!  ratio: Float! }
+type InverterPerformance {
+  measuredKwh: Float!  expectedKwh: Float!  performanceRatio: Float!
+  specificYieldKwhPerKwp: Float!  months: [InverterMonthPerformance!]!
+  underperforming: Boolean!  underperformancePct: Float!
+}
+type RealSolarAnalysis {           # mismos campos que SolarSimulation, pero con producción MEDIDA
+  rangeStart: String!  rangeEnd: String!
+  annualProductionKwh: Float!  annualSelfConsumptionKwh: Float!  annualSurplusKwh: Float!
+  selfConsumptionRatio: Float!  coverageRatio: Float!  annualSavingEur: Float!  paybackYears: Float
+  months: [SolarMonth!]!
+}
+type InverterUploadResult {
+  report: InverterValidationReport!
+  realSolar: RealSolarAnalysis!
+  performance: InverterPerformance!
+}
+
+extend type Query { detectInverterMapping(input: DetectInverterMappingInput!): InverterMappingProposal! }
+extend type Mutation { analyzeInverterUpload(input: AnalyzeInverterUploadInput!): InverterUploadResult! }
+```
+
+**Errores esperados** (`extensions.code`):
+
+| Código | Condición |
+|--------|-----------|
+| `INVERTER_INVALID_MAPPING` | `mapping` incoherente (sin columna de valor, `decimal`∉{`,`,`.`}, `unitScaleToKwh ≤ 0`, huso IANA inválido) |
+| `INVERTER_PARSE_FAILED` | Ninguna fila parsea con el mapeo dado (columna de tiempo no interpretable) |
+| `SOLAR_INVALID_PARAMS` | `kwp ≤ 0` (reutiliza el de §8.4) |
+| `SUPPLY_NOT_FOUND` | El CUPS no existe |
+| `BACKFILL_PENDING`/`RUNNING`/`FAILED` | Histórico de consumo no disponible (§3.5) |
+| `NO_CONSUMPTION_DATA` | No hay curva de consumo para cruzar |
+| `PVGIS_UNAVAILABLE` | PVGIS no responde (no hay baseline para el performance) |
+
+> **Autorización** (§2.2): `detectInverterMapping` (lectura) → `assertSupplyAccess`. `analyzeInverterUpload`
+> (computación sobre datos del cliente) → rol de escritura (DOMINION/ADMIN/GESTOR); `USUARIO` → `FORBIDDEN`.
+
+#### 8.12.7 Casos de test — contrato de implementación
+
+> Engine y mapeador son unitarios (puros, sin I/O). Resolver/servicio, de integración con Prisma/Influx/
+> PVGIS mockeados. Nomenclatura `TC-INV-NNN`. Fixtures en `packages/inverter-ingest/test/fixtures/`.
+
+- **TC-INV-001 — Energía de intervalo directa — Unit**: filas `kWh` por intervalo → `applyMapping` suma a hora sin transformar.
+- **TC-INV-002 — kW→kWh por integración del paso — Unit**: potencia constante 4 kW en 4×15 min → 4 kWh/hora (Δt=0.25 h).
+- **TC-INV-003 — Acumulado total → diferencia — Unit**: serie monótona `TOTAL_YIELD` → energía = diff; primer punto sin previo no produce kWh.
+- **TC-INV-004 — Acumulado diario con reset — Unit**: `DAILY_YIELD` que cae a 0 a medianoche → diff negativa descartada (`negativeDropped`), no resta.
+- **TC-INV-005 — Huso local→UTC con DST — Unit**: timestamp `Europe/Madrid` en verano (UTC+2) e invierno (UTC+1) → hora UTC correcta; cruce de cambio de hora sin duplicar/perder energía.
+- **TC-INV-006 — Agregación 15min→hora — Unit**: 4 muestras de 15 min → 1 punto horario (Σ energía); huecos dejan `hourGaps`.
+- **TC-INV-007 — Multi-inversor pivotado se suma — Unit**: N `valueColumns` (layout FusionSolar) → Σ por timestamp.
+- **TC-INV-008 — Coma decimal y `;` — Unit**: `1.234,56` con `decimal=','` → 1234.56; fixture ES.
+- **TC-INV-009 — detectMapping propone columnas y casa preset — Unit**: cabecera FusionSolar ES → propone tiempo/valor/huso, `presetMatched="huawei-fusionsolar"`, `confidence` alta.
+- **TC-INV-010 — detectMapping marca fecha ambigua — Unit**: `03/04/2026` indistinguible día/mes → `warnings` lo señala, `confidence` < 1.
+- **TC-INV-011 — comparePerformance PR y kWh/kWp — Unit**: medido=850, esperado=1000, kwp=10 → `performanceRatio=0.85`, `specificYieldKwhPerKwp=85`, `underperforming=false` (umbral 0.85), límite inclusive documentado.
+- **TC-INV-012 — comparePerformance detecta infraproducción — Unit**: PR=0.70 < 0.85 → `underperforming=true`, `underperformancePct=30`, mes con mayor caída identificado.
+- **TC-INV-013 — validate: cobertura, huecos, solape con consumo — Unit**: serie con huecos y rango parcial → `coveragePct`/`consumptionOverlapPct` correctos.
+- **TC-INV-014 — analyzeInverterUpload cruza con consumo real (reutiliza simulateSolar) — Integration**: produce `realSolar` con ratios y ahorro a partir de la serie MEDIDA + curva mock; `eurPerKwh` idéntico a M01.
+- **TC-INV-015 — analyzeInverterUpload no persiste — Integration**: spy ⇒ ninguna escritura en Prisma/Influx; devuelve el resultado al vuelo.
+- **TC-INV-016 — Errores y autorización — Integration**: `kwp=0`→`SOLAR_INVALID_PARAMS`; sin curva→`NO_CONSUMPTION_DATA`; mapeo vacío→`INVERTER_INVALID_MAPPING`; `USUARIO`→`FORBIDDEN`; `BACKFILL_*` propagado.
+
+#### 8.12.8 Modo demo y front
+
+- **`makeDemoInverterDataSource()`**: reutiliza la curva de consumo + PVPC deterministas de
+  `makeDemoSolarDataSource` (§8.8) y un baseline PVGIS determinista; **no escribe nada**. En `index.ts` se
+  inyecta `makeInfluxInverterDataSource` (lectura de consumo/PVPC + baseline PVGIS; persistencia latente);
+  en `demo.ts`, la demo.
+- **Front — pestaña "Real / Inversor" de `/solar`** (cuarta pestaña junto a Simular/Dimensionar/Orientar).
+  Flujo del **asistente de importación**: (1) subir **CSV o XLSX** → preview de filas; (2) `detectInverterMapping`
+  propone el mapeo → formulario para **confirmar/corregir** (columna tiempo/valor, unidad, huso, decimal,
+  filas a saltar) + **gráfica de un día** interpretada en vivo; (3) `analyzeInverterUpload` → muestra el
+  **informe de validación**, los **KPIs reales** (autoconsumo/cobertura/ahorro, como §8.7 pero medidos) y
+  el **performance** (PR, kWh/kWp, alerta de infraproducción + gráfica mensual medido vs esperado). No
+  normativo en lo visual; el flujo de datos sí.
+  > **Lectura del fichero (solo front)**: el navegador convierte el fichero a `string[][]` antes de enviarlo;
+  > el backend **siempre recibe filas de texto**, nunca el binario. CSV → split por `,`/`;`; **XLSX/XLS** →
+  > SheetJS (`xlsx`, ya instalada por M04) vía import dinámico (`{ header: 1, raw: false }`). Si el libro
+  > Excel tiene **varias hojas**, un **selector** deja elegir cuál contiene la generación (por defecto la
+  > primera). A partir del `string[][]`, el flujo (detección + análisis) es idéntico para ambos formatos.
+
+#### 8.12.9 Estado de implementación (2026-06-25)
+
+**HECHO y VERIFICADO** (slice completo; `npm run build` + `npm test` + `npm run build:web` verdes):
+
+- ✅ `packages/inverter-ingest` — paquete puro nuevo: `detectMapping` (heurística), `applyMapping`/
+  `applyMappingWithStats` (huso→UTC con DST vía `Intl`, kW→kWh por integración del paso modal,
+  acumulado→diff con reset diario, 15min→hora, coma decimal, multi-inversor), `validate`,
+  `comparePerformance` + `alignExpectedToMeasured`, `parseCsv`, `SEED_PRESETS` (6 marcas + genérico).
+  18 unit `TC-INV-001..013` (los demás son de integración).
+- ✅ `apps/api` — `inverterData.ts` (`InverterDataSource`: real envuelve M06 + `persistMeasuredSeries`
+  LATENTE; demo no-op), `inverterService.ts` (`analyzeInverterUpload` reutiliza `loadPricedHours` +
+  `simulateSolar` + baseline PVGIS; `detectInverterMapping`), `runtime.ts` (`set/getInverterDataSource`),
+  resolver `inverter.ts`, typeDefs, errores `INVERTER_INVALID_MAPPING`/`INVERTER_PARSE_FAILED`. 11
+  integración `TC-INV-014..016` (+ detección y casos de error/authz).
+- ✅ Demo — `demoInverterDataSource.ts` (reutiliza la curva determinista de M06) + bootstrap en `demo.ts`.
+- ✅ Front — pestaña **Real / Inversor** en `/solar` (`solar-inverter.component.ts`): subir CSV →
+  `detectInverterMapping` → formulario de mapeo + preview → `analyzeInverterUpload` → KPIs reales +
+  performance (PR, kWh/kWp, alerta de infraproducción).
+- ✅ Sin modelo Prisma nuevo, sin measurement nuevo escrito (Fase 1 = análisis al vuelo).
+
+**Desviaciones respecto al spec literal de §8.12 (conscientes):**
+
+1. **`AnalyzeInverterUploadInput` lleva `lat`/`lon` (+ `lossPct`/`tilt`/`azimuth`)**: el baseline PVGIS del
+   performance los necesita (como `SimulateSolarInput`); el SPECS los implicaba pero no los listaba. SDL
+   actualizado en §8.12.6.
+2. **`detectMapping` localiza la cabecera por transición**: la fila de cabecera es la última no-temporal
+   **antes** de la primera fila cuyo primer campo parsea como tiempo (no "≥2 celdas de texto", que confundía
+   las líneas de metadatos del portal). Si existe una columna **"Sum"/"total"** se prefiere como valor único.
+3. **Fixture de calibración sintético**: no se halló un export real de Huawei FusionSolar de España en abierto
+   (portal privado); se usa un fixture sintético fiel al formato (pivotado, `;`, coma decimal, metadatos,
+   tz Madrid). Sustituible por un export real de cliente sin cambiar código.
+
+**PENDIENTE** (deuda consciente):
+
+1. **Persistencia InfluxDB de la serie medida** (`pv_production_measured`): **especificada y escrita pero
+   latente** en `makeInfluxInverterDataSource` (no-op) hasta montar InfluxDB. Transversal con la deuda de
+   migraciones Prisma de M01–M06.
+2. **Adapters de marca dedicados**: hoy un único mapeador genérico + presets de cabecera cubren cualquier
+   marca vía confirmación en el front. Formatos especialmente sucios (cabeceras multinivel) podrían
+   necesitar un preset más fino. **XLSX/XLS: soportado** (2026-06-26) — el front lo lee con SheetJS
+   (`xlsx`, import dinámico) y lo convierte a `string[][]`, con **selector de hoja** si el libro tiene
+   varias; el backend sigue recibiendo filas de texto sin cambios. Limitación: `.xls` BIFF antiguo no
+   probado con fixture (el caso principal es `.xlsx`).
+3. **PR no normalizado por irradiación real** del periodo (baseline PVGIS = año tipo): el performance ratio
+   es **indicativo de tendencia**, no certificación IEC 61724.
+4. **Sin test de front automatizado** (sin infra karma/jasmine; verificación manual), igual que el resto de `/solar`.
+
+> Persistencia InfluxDB de la serie medida: **especificada, latente** hasta montar la infra.
+
 ---
 
 ## 9. M07 — Comparativa de suministros
@@ -4863,6 +5183,199 @@ Los tests de M01 y M02 son Unit e Integration. No se definen tests E2E hasta que
 - pricing-engine (o equivalente de cálculo puro): 100 % de ramas del algoritmo
 - Resolvers GraphQL: todos los errores definidos en `§N.5 Errores esperados`
 - Adaptadores de ingesta: conversiones de unidad + comportamiento ante respuesta 429
+
+---
+
+## 11. Dashboard de inicio (panel transversal)
+
+Pantalla de **aterrizaje tras el login** (`/dashboard`, ruta por defecto). Da al usuario una visión *de
+un vistazo* del estado de su empresa: coste y consumo del último periodo, alertas abiertas, ahorro
+potencial detectado y estado de su cartera de suministros. **Adaptada al rol** del usuario autenticado.
+
+Al igual que M07, **no introduce lógica de dominio nueva ni fuentes de datos**: solo **lee y agrega** lo
+que M01–M06 ya persistieron en Postgres. Por eso es un **módulo transversal**, no un `Mxx` (la sigla
+`M08` queda reservada para el comparador de mercado del Apéndice A). No tiene engine puro, ni modelo
+Prisma propio, ni measurement de InfluxDB, ni adaptador de ingesta.
+
+### 11.0 Decisiones de diseño (premisas de este módulo)
+
+> **Solo datos persistidos; cero cálculo on-demand.** El dashboard **nunca** llama a DATADIS/ESIOS/REData
+> ni recalcula pre-facturas. Agrega exclusivamente lo guardado: `PreInvoice`, `Alert`, `PowerOptimization`,
+> `CarbonReport`. Así la carga es rápida y **no consume cupo de DATADIS** (evita el riesgo de 429 de §3.1).
+> Un suministro sin datos persistidos aparece con métricas `null` (estado vacío en el front), no rompe la
+> agregación.
+
+> **El scope se deriva del JWT, nunca de un argumento.** La query `dashboard` **no recibe parámetros**:
+> el conjunto de suministros visibles se determina por el rol del usuario autenticado (§2.2/§2.3), igual
+> que el resto de resolvers. No hay forma de pedir el dashboard "de otro cliente".
+
+> **Agregación iterando por suministro, sin `groupBy`/`aggregate`/`in`.** El servicio resuelve los
+> suministros del scope y, por cada uno, consulta lo último persistido con el mismo shape que ya usan los
+> resolvers (`findMany({ where:{supplyId}, orderBy, take })`). Es un **único code path** que funciona igual
+> contra Postgres real y contra el store en memoria del modo demo (que filtra estrictamente por `supplyId`
+> y no implementa `in`/`groupBy`/`aggregate`/`count`). A escala "Lite" el coste es trivial.
+
+> **Sin redondeo intermedio** (consistente con §3.4 … §9.4): la agregación opera en doble precisión; el
+> redondeo es solo de presentación en el front (`number:'1.2-2'`).
+
+> **`kWh` del periodo = suma de las líneas de energía.** El consumo de una `PreInvoice` se obtiene sumando
+> `quantity` de sus `PreInvoiceLine` con `unit = 'kWh'` (no se relee InfluxDB).
+
+### 11.0bis Prerrequisitos de implementación
+
+- **Sin paquete nuevo, sin engine**: la agregación vive en un servicio fino.
+- **Nuevo servicio** `apps/api/src/services/dashboardService.ts`: `computeDashboard(user, prisma)`.
+- **Nuevo resolver** `apps/api/src/graphql/resolvers/dashboard.ts` + registro en `resolvers/index.ts`.
+- **Extensión de typeDefs** (`graphql/typeDefs.ts`): tipos `DashboardSummary`, `DashboardTotals`,
+  `MonthlyCostPoint`, `DashboardAlert`, `DashboardSupplyRow`, enum `DashboardScope`, y query `dashboard`.
+  Reutiliza los enums `Tariff` y `SupplyStatus`.
+- **Delegate `client` en el store demo** (`apps/api/src/demo/store.ts`): `findUnique`/`findMany`
+  (hoy el store no lo expone) + semillas de `PreInvoice`, `Alert` y `PowerOptimization` para que el panel
+  demo tenga contenido.
+- **Front**: reescritura de `apps/web/src/app/dashboard/dashboard.component.ts` para consumir la query
+  `dashboard` (sustituye la maqueta hardcodeada) y cambio del `redirectTo` de `/` y `**` a `/dashboard`
+  en `app.routes.ts`.
+- **Patrón de tests**: Vitest; mock de Prisma con `vi.hoisted` (§10.3).
+- **Sin worker**.
+
+### 11.1 Fuentes de datos
+
+Ninguna nueva. Lee a través de Prisma las tablas que M01–M05 ya pueblan.
+
+| Fuente (tabla) | Dato agregado |
+|----------------|---------------|
+| `Supply` (+ `Client`) | Cartera del scope: estado, tarifa, nombre de cliente, `backfillStatus` |
+| `PreInvoice` (+ `lines`) | Coste (`total`) y consumo (Σ líneas `kWh`) del último periodo y el anterior; serie mensual |
+| `Alert` | Alertas abiertas (`NEW`/`ACKNOWLEDGED`) por severidad; las más recientes |
+| `PowerOptimization` | Ahorro anual potencial (`annualSaving` con `recommendChange = true`) |
+| `CarbonReport` | Desvío del factor de emisión vs media nacional (`deltaPct`), opcional |
+
+### 11.2 Modelos Prisma
+
+**Ninguno.** El dashboard es una vista derivada; no persiste nada.
+
+### 11.3 Esquema InfluxDB
+
+**Ninguno.**
+
+### 11.4 Alcance por rol
+
+| Rol | `scope` | Suministros incluidos (`where`) | Extras |
+|-----|---------|---------------------------------|--------|
+| DOMINION | `PLATFORM` | todos (`{}`) | `pendingApprovals` (suministros `PENDING_APPROVAL`), `clientCount` |
+| ADMIN | `CLIENT` | `{ clientId }` del usuario | — |
+| GESTOR / USUARIO | `SUPPLY` | `{ id: supplyId }` del usuario | cartera de 1 fila |
+
+### 11.5 Esquema GraphQL
+
+```graphql
+enum DashboardScope { PLATFORM CLIENT SUPPLY }
+
+type DashboardSummary {
+  scope: DashboardScope!
+  generatedAt: String!
+  totals: DashboardTotals!
+  monthlyCost: [MonthlyCostPoint!]!   # últimos 6 meses, orden ascendente
+  recentAlerts: [DashboardAlert!]!    # abiertas, más recientes primero (máx. 8)
+  supplies: [DashboardSupplyRow!]!    # una fila por suministro del scope
+  pendingApprovals: Int!              # >0 solo DOMINION
+  clientCount: Int!                   # >0 solo DOMINION
+}
+
+type DashboardTotals {
+  activeSupplies: Int!
+  pendingSupplies: Int!
+  inactiveSupplies: Int!
+  lastPeriodCostEur: Float            # Σ total de la última PreInvoice de cada suministro; null si ninguna
+  prevPeriodCostEur: Float            # Σ total de la penúltima; null si no hay
+  lastPeriodKwh: Float
+  openAlerts: Int!
+  openAlertsHigh: Int!                # severidad CRITICAL
+  annualSavingEur: Float              # Σ annualSaving (recommendChange = true); null si ninguna
+  carbonDeltaPct: Float               # media de deltaPct ponderada por kWh; null si no hay informes
+}
+
+type MonthlyCostPoint { month: String!, eur: Float! }   # month = "YYYY-MM"
+
+type DashboardAlert {
+  id: ID!, supplyId: ID!, cups: String!, type: String!,
+  severity: String!, message: String!, detectedAt: String!
+}
+
+type DashboardSupplyRow {
+  id: ID!, cups: String!, clientName: String, tariff: Tariff!, status: SupplyStatus!,
+  lastPeriod: String, lastKwh: Float, lastCostEur: Float,
+  openAlerts: Int!, annualSavingEur: Float, backfillStatus: String!
+}
+
+extend type Query {
+  dashboard: DashboardSummary!
+}
+```
+
+### 11.6 Algoritmo de agregación — paso a paso
+
+1. `requireAuth(user)`. Determinar `scope` y `where` según rol (§11.4).
+2. `supplies = prisma.supply.findMany({ where })`. Resolver `clientName` por `clientId`
+   (`prisma.client.findUnique`), cacheando por id.
+3. Por cada suministro (en paralelo):
+   - `preInvoices = findMany({ where:{supplyId}, orderBy:{periodFrom:'desc'}, take:24, include:{lines:true} })`.
+     `lastCostEur = preInvoices[0]?.total`; `prevCostEur = preInvoices[1]?.total`;
+     `lastKwh = Σ line.quantity (unit='kWh')` de `preInvoices[0]`.
+   - `alerts = findMany({ where:{supplyId} })` filtrando en memoria `status ∈ {NEW, ACKNOWLEDGED}`.
+   - `opt = findMany({ where:{supplyId}, orderBy:{analysisTo:'desc'}, take:1 })[0]`;
+     aporta `annualSaving` solo si `recommendChange`.
+   - `carbon = findMany({ where:{supplyId}, orderBy:{computedAt:'desc'}, take:1 })[0]`.
+4. Totales: sumar coste último/anterior y kWh; contar suministros por `status`; contar alertas abiertas
+   y `CRITICAL`; sumar ahorros; `carbonDeltaPct = Σ(deltaPct·kWh)/Σ kWh`.
+5. `monthlyCost`: agrupar **todas** las `PreInvoice` recolectadas por mes de `periodFrom` (`"YYYY-MM"`, UTC),
+   sumar `total`, ordenar ascendente y quedarse con los últimos 6.
+6. `recentAlerts`: aplanar las abiertas, ordenar por `detectedAt` desc, recortar a 8, anexar `cups`.
+7. DOMINION: `pendingApprovals = nº supplies PENDING_APPROVAL`; `clientCount = prisma.client.findMany().length`.
+   Resto: ambos `0`.
+
+### 11.7 Errores esperados
+
+| Código | Cuándo |
+|--------|--------|
+| `UNAUTHENTICATED` | Sin usuario en contexto (token ausente/ inválido). |
+
+No hay otros: la query es de solo lectura y el scope se autolimita; un usuario sin datos recibe un
+`DashboardSummary` con listas vacías y métricas `null`.
+
+### 11.8 Casos de test (Integration; Vitest + mock Prisma `vi.hoisted`, §10.3)
+
+| TC | Descripción | Verificación |
+|----|-------------|--------------|
+| **TC-DASH-001** | ADMIN agrega solo su `clientId` | `supply.findMany` se invoca con `where.clientId`; totales = Σ últimas `PreInvoice` |
+| **TC-DASH-002** | Variación de coste | `lastPeriodCostEur`/`prevPeriodCostEur` correctos; `prev` null sin penúltima |
+| **TC-DASH-003** | Recuento de alertas | `openAlerts`/`openAlertsHigh` cuentan `NEW`+`ACKNOWLEDGED` (no `DISMISSED`); `CRITICAL`→high |
+| **TC-DASH-004** | Ahorro potencial | `annualSavingEur` = Σ `annualSaving` con `recommendChange=true`; ignora `false` |
+| **TC-DASH-005** | Scope de suministro único | GESTOR/USUARIO ⇒ `scope=SUPPLY`, `where.id=supplyId`, cartera de 1 fila |
+| **TC-DASH-006** | Extras de DOMINION | `pendingApprovals` cuenta `PENDING_APPROVAL`; `clientCount` correcto |
+| **TC-DASH-007** | Suministro sin pre-factura | `lastCostEur=null`, sin excepción; fila en estado vacío |
+| **TC-DASH-008** | Serie mensual | `monthlyCost` agrupa por `"YYYY-MM"`, ordena asc y limita a 6 |
+| **TC-DASH-009** | Sin autenticar | `UNAUTHENTICATED` |
+
+---
+
+## Apéndice A — Pruebas de concepto exploratorias (NO forman parte del alcance)
+
+> **Importancia: baja.** Son maquetas desechables, fuera del monorepo de producción (carpetas
+> sueltas, sin tests ni DBs). No son contrato de implementación. Se documentan solo para que conste
+> que existen y de dónde salieron, por si en el futuro se retoma la idea de un módulo de comparación
+> de mercado (posible "M08").
+
+Ambas se levantan con Node (sin dependencias) y abren una página web local.
+
+| PoC | Carpeta | Qué hace (en cristiano) | Cómo abrirla |
+|-----|---------|-------------------------|--------------|
+| **Comparador de ofertas CNMC** (baja tensión) | `cnmc-demo/` | Coge los datos de un suministro (CP, potencia, consumo) y consulta la API pública de la CNMC para listar y ordenar las ofertas reales de comercializadoras (2.0TD/3.0TD), comparándolas con el coste actual. Solo sirve para pymes/comercios en baja tensión. | `cd cnmc-demo && node server.mjs` → http://localhost:8080 |
+| **Comparador de cotizaciones de Alta Tensión** (6.xTD) | `at-cotizaciones-demo/` | Para industria en alta tensión, donde NO hay precios públicos. Coge cotizaciones de ejemplo (fijo / indexado / híbrido / PPA), las cruza con el precio de mercado real (REData/REE) y la curva de consumo, y devuelve el coste anual esperado y el riesgo de cada una. Las cotizaciones y los peajes son de ejemplo; solo el precio de mercado es real. | `cd at-cotizaciones-demo && node server.mjs` → http://localhost:8090 |
+
+Conclusión de las pruebas: el comparador de la CNMC cubre **solo baja tensión**; para los clientes
+industriales en **alta tensión** no existen precios públicos que consultar (son cotizaciones
+bilaterales), por lo que cualquier comparador de AT debe partir de cotizaciones aportadas, no scrapeadas.
 
 ---
 

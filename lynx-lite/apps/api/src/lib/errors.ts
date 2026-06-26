@@ -31,7 +31,10 @@ export type ErrorCode =
   | 'CO2_NO_FACTOR_DATA'
   // M06
   | 'SOLAR_INVALID_PARAMS'
-  | 'PVGIS_UNAVAILABLE';
+  | 'PVGIS_UNAVAILABLE'
+  // M06.3 — ingesta de inversor
+  | 'INVERTER_INVALID_MAPPING'
+  | 'INVERTER_PARSE_FAILED';
 
 export function gqlError(code: ErrorCode, message?: string): GraphQLError {
   return new GraphQLError(message ?? code, { extensions: { code } });

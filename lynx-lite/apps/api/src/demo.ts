@@ -6,7 +6,7 @@ import { typeDefs } from './graphql/typeDefs.js';
 import { resolvers } from './graphql/resolvers/index.js';
 import { buildContext, type ApolloContext } from './context.js';
 import { setPrisma } from './lib/prisma.js';
-import { setDataSource, setOptimizationDataSource, setAlertDataSource, setKpiDataSource, setCarbonDataSource, setSolarDataSource } from './services/runtime.js';
+import { setDataSource, setOptimizationDataSource, setAlertDataSource, setKpiDataSource, setCarbonDataSource, setSolarDataSource, setInverterDataSource } from './services/runtime.js';
 import { createInMemoryStore } from './demo/store.js';
 import { makeDemoDataSource } from './demo/demoDataSource.js';
 import { makeDemoOptimizationDataSource } from './demo/demoOptimizationDataSource.js';
@@ -14,6 +14,7 @@ import { makeDemoAlertDataSource } from './demo/demoAlertDataSource.js';
 import { makeDemoKpiDataSource } from './demo/demoKpiDataSource.js';
 import { makeDemoCarbonDataSource } from './demo/demoCarbonDataSource.js';
 import { makeDemoSolarDataSource } from './demo/demoSolarDataSource.js';
+import { makeDemoInverterDataSource } from './demo/demoInverterDataSource.js';
 
 // Bootstrap del MODO DEMO: GraphQL real con datos en memoria (sin Postgres ni InfluxDB).
 // El motor de cálculo es el real; solo cambian los orígenes de datos.
@@ -26,6 +27,7 @@ async function main() {
   setKpiDataSource(makeDemoKpiDataSource()); // curva + PVPC deterministas para M04
   setCarbonDataSource(makeDemoCarbonDataSource()); // curva + factor de emisión deterministas para M05
   setSolarDataSource(makeDemoSolarDataSource()); // curva + producción PVGIS deterministas para M06
+  setInverterDataSource(makeDemoInverterDataSource()); // M06.3: consumo + baseline PVGIS para el cruce real
   // No se inyecta ingesta: los datos del demo se consideran "ya disponibles".
 
   const server = new ApolloServer<ApolloContext>({ typeDefs, resolvers });
@@ -35,7 +37,7 @@ async function main() {
   app.use(
     '/graphql',
     cors(), // permite el origen del dev server de Angular (localhost:4200)
-    express.json(),
+    express.json({ limit: '50mb' }), // M06.3 sube el CSV crudo del inversor en el body (un año 15-min son MBs)
     expressMiddleware(server, { context: buildContext }),
   );
 

@@ -5,6 +5,7 @@ import type { KpiDataSource } from './kpiData.js';
 import type { CarbonDataSource } from './carbonData.js';
 import type { Co2Ingestion } from './carbonIngestion.js';
 import type { SolarDataSource } from './solarData.js';
+import type { InverterDataSource } from './inverterData.js';
 import type { EnsureData } from './ingestion.js';
 
 // Holder del DataSource de pre-factura. El bootstrap (src/index.ts) lo inicializa
@@ -108,6 +109,22 @@ export function getSolarDataSource(): SolarDataSource {
     throw new Error('SolarDataSource no inicializado. Llama a setSolarDataSource() en el arranque.');
   }
   return solarDataSource;
+}
+
+// Holder del DataSource de producción FV real medida (M06.3). Mismo patrón: el bootstrap lo inicializa
+// con la implementación InfluxDB+PVGIS (persistencia latente); el demo con un generador determinista;
+// los tests con un mock.
+let inverterDataSource: InverterDataSource | null = null;
+
+export function setInverterDataSource(ds: InverterDataSource): void {
+  inverterDataSource = ds;
+}
+
+export function getInverterDataSource(): InverterDataSource {
+  if (!inverterDataSource) {
+    throw new Error('InverterDataSource no inicializado. Llama a setInverterDataSource() en el arranque.');
+  }
+  return inverterDataSource;
 }
 
 // Holder de la ingesta on-demand (opcional). Si no se inicializa, el servicio de

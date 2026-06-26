@@ -6,6 +6,7 @@ import { alertResolvers } from './alert.js';
 import { kpiResolvers } from './kpi.js';
 import { carbonResolvers } from './carbon.js';
 import { solarResolvers } from './solar.js';
+import { inverterResolvers } from './inverter.js';
 import { comparisonResolvers } from './comparison.js';
 
 export const resolvers = {
@@ -19,6 +20,7 @@ export const resolvers = {
     ...kpiResolvers.Query,
     ...carbonResolvers.Query,
     ...solarResolvers.Query,
+    ...inverterResolvers.Query,
   },
   Mutation: {
     ...authResolvers.Mutation,
@@ -29,5 +31,6 @@ export const resolvers = {
     ...kpiResolvers.Mutation,
     ...carbonResolvers.Mutation,
     ...solarResolvers.Mutation,
+    ...inverterResolvers.Mutation,
   },
 };

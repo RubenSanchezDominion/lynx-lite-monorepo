@@ -4,13 +4,14 @@ import { expressMiddleware } from '@apollo/server/express4';
 import { typeDefs } from './graphql/typeDefs.js';
 import { resolvers } from './graphql/resolvers/index.js';
 import { buildContext, type ApolloContext } from './context.js';
-import { setDataSource, setIngestion, setOptimizationDataSource, setAlertDataSource, setKpiDataSource, setCarbonDataSource, setCo2Ingestion, setSolarDataSource } from './services/runtime.js';
+import { setDataSource, setIngestion, setOptimizationDataSource, setAlertDataSource, setKpiDataSource, setCarbonDataSource, setCo2Ingestion, setSolarDataSource, setInverterDataSource } from './services/runtime.js';
 import { makeInfluxDataSource } from './services/preInvoiceData.js';
 import { makeInfluxOptimizationDataSource } from './services/powerOptimizationData.js';
 import { makeInfluxAlertDataSource } from './services/alertData.js';
 import { makeInfluxKpiDataSource } from './services/kpiData.js';
 import { makeInfluxCarbonDataSource } from './services/carbonData.js';
 import { makeInfluxSolarDataSource } from './services/solarData.js';
+import { makeInfluxInverterDataSource } from './services/inverterData.js';
 import { makeOnDemandIngestion, makeConsumptionCoverage } from './services/ingestion.js';
 import { makeOnDemandCo2Ingestion, makeCo2Coverage } from './services/carbonIngestion.js';
 import { createDatadisHttp, createEsiosHttp, createRedataHttp, createPvgisHttp, EMISSION_COEFFICIENTS } from '@lynx-lite/data-collector';
@@ -25,6 +26,8 @@ async function main() {
   setCarbonDataSource(makeInfluxCarbonDataSource(queryApi));
   const pvgis = createPvgisHttp({ baseUrl: process.env.PVGIS_URL ?? 'http://localhost:3004' });
   setSolarDataSource(makeInfluxSolarDataSource(queryApi, pvgis));
+  // M06.3: lectura de consumo/PVPC + baseline PVGIS; persistencia de la serie medida LATENTE (Fase 1).
+  setInverterDataSource(makeInfluxInverterDataSource(queryApi, pvgis));
 
   // Ingesta on-demand (anti-429): comprueba cobertura en InfluxDB antes de llamar a DATADIS.
   const datadis = createDatadisHttp({
@@ -59,7 +62,7 @@ async function main() {
   const app = express();
   app.use(
     '/graphql',
-    express.json(),
+    express.json({ limit: '50mb' }), // M06.3 sube el CSV crudo del inversor en el body (un año 15-min son MBs)
     expressMiddleware(server, { context: buildContext }),
   );
 

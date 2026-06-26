@@ -5,6 +5,7 @@ import { GraphqlService } from '../services/graphql.service';
 import { TopbarComponent } from '../shared/topbar.component';
 import { SolarSizingComponent } from './solar-sizing.component';
 import { SolarOrientationComponent } from './solar-orientation.component';
+import { SolarInverterComponent } from './solar-inverter.component';
 
 interface SolarMonth {
   monthKey: string;
@@ -35,7 +36,7 @@ const SIMULATE = `mutation($i: SimulateSolarInput!) { simulateSolar(input: $i) {
 @Component({
   selector: 'app-solar',
   standalone: true,
-  imports: [CommonModule, FormsModule, TopbarComponent, SolarSizingComponent, SolarOrientationComponent],
+  imports: [CommonModule, FormsModule, TopbarComponent, SolarSizingComponent, SolarOrientationComponent, SolarInverterComponent],
   template: `
     <app-topbar section="Autoconsumo solar (M06)" />
 
@@ -43,6 +44,7 @@ const SIMULATE = `mutation($i: SimulateSolarInput!) { simulateSolar(input: $i) {
       <button [class.active]="tab === 'simular'" (click)="tab = 'simular'">Simular</button>
       <button [class.active]="tab === 'dimensionar'" (click)="tab = 'dimensionar'">Dimensionar</button>
       <button [class.active]="tab === 'orientar'" (click)="tab = 'orientar'">Orientar</button>
+      <button [class.active]="tab === 'real'" (click)="tab = 'real'">Real / Inversor</button>
     </div>
 
     <ng-container *ngIf="tab === 'simular'">
@@ -107,6 +109,7 @@ const SIMULATE = `mutation($i: SimulateSolarInput!) { simulateSolar(input: $i) {
 
     <app-solar-sizing *ngIf="tab === 'dimensionar'" />
     <app-solar-orientation *ngIf="tab === 'orientar'" />
+    <app-solar-inverter *ngIf="tab === 'real'" [supplies]="supplies" />
   `,
   styles: [
     `
@@ -141,7 +144,7 @@ const SIMULATE = `mutation($i: SimulateSolarInput!) { simulateSolar(input: $i) {
   ],
 })
 export class SolarComponent implements OnInit {
-  tab: 'simular' | 'dimensionar' | 'orientar' = 'simular';
+  tab: 'simular' | 'dimensionar' | 'orientar' | 'real' = 'simular';
   supplies = [
     { cups: 'ES0031000000000002JN', supplyId: 'supply-20td', label: 'Pyme 2.0TD' },
     { cups: 'ES0031000000000001JN', supplyId: 'supply-30td', label: 'Industrial 3.0TD' },

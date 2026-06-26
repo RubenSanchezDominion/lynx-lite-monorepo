@@ -462,9 +462,169 @@ export const typeDefs = /* GraphQL */ `
     recommended: SolarOrientationPoint!
   }
 
+  # ─── Producción FV real medida — ingesta de inversor (M06.3, §8.12) ───────────
+  enum InverterValueKind { ENERGY_INTERVAL POWER CUMULATIVE_TOTAL CUMULATIVE_DAILY }
+
+  type InverterColumnMapping {
+    timeColumn: String!
+    timeFormat: String
+    valueColumns: [String!]!
+    valueKind: InverterValueKind!
+    unitScaleToKwh: Float!
+    decimal: String!
+    timezone: String!
+    skipRows: Int!
+  }
+
+  input InverterColumnMappingInput {
+    timeColumn: String!
+    timeFormat: String
+    valueColumns: [String!]!
+    valueKind: InverterValueKind!
+    unitScaleToKwh: Float!
+    decimal: String!
+    timezone: String!
+    skipRows: Int!
+  }
+
+  type InverterMappingProposal {
+    mapping: InverterColumnMapping!
+    confidence: Float!
+    presetMatched: String
+    warnings: [String!]!
+  }
+
+  input DetectInverterMappingInput {
+    cups: String!
+    sampleRows: [[String!]!]!
+  }
+
+  input AnalyzeInverterUploadInput {
+    cups: String!
+    rows: [[String!]!]!
+    mapping: InverterColumnMappingInput!
+    kwp: Float!
+    lat: Float!
+    lon: Float!
+    lossPct: Float
+    tilt: Float
+    azimuth: Float
+    costPerKwp: Float
+    underperformanceThreshold: Float # default 0.85
+  }
+
+  type InverterValidationReport {
+    rowsParsed: Int!
+    rowsSkipped: Int!
+    rangeStart: String!
+    rangeEnd: String!
+    detectedUnit: InverterValueKind!
+    detectedTimezone: String!
+    hourGaps: Int!
+    duplicates: Int!
+    negativeDropped: Int!
+    coveragePct: Float!
+    consumptionOverlapPct: Float!
+    warnings: [String!]!
+  }
+
+  type InverterMonthPerformance {
+    key: String!
+    measuredKwh: Float!
+    expectedKwh: Float!
+    ratio: Float!
+  }
+
+  type InverterPerformance {
+    measuredKwh: Float!
+    expectedKwh: Float!
+    performanceRatio: Float!
+    specificYieldKwhPerKwp: Float!
+    months: [InverterMonthPerformance!]!
+    underperforming: Boolean!
+    underperformancePct: Float!
+  }
+
+  # Mismos campos que SolarSimulation pero con producción MEDIDA; on-demand, no persiste.
+  type RealSolarAnalysis {
+    rangeStart: String!
+    rangeEnd: String!
+    annualProductionKwh: Float!
+    annualSelfConsumptionKwh: Float!
+    annualSurplusKwh: Float!
+    selfConsumptionRatio: Float!
+    coverageRatio: Float!
+    annualSavingEur: Float!
+    paybackYears: Float
+    months: [SolarMonth!]!
+  }
+
+  type InverterUploadResult {
+    report: InverterValidationReport!
+    realSolar: RealSolarAnalysis!
+    performance: InverterPerformance!
+  }
+
   # ─── Operaciones ────────────────────────────────────────────────────────────
+  # ─── Dashboard de inicio (panel transversal, SPECS §11) ──────────────────────
+  enum DashboardScope { PLATFORM CLIENT SUPPLY }
+
+  type DashboardSummary {
+    scope: DashboardScope!
+    generatedAt: String!
+    totals: DashboardTotals!
+    monthlyCost: [MonthlyCostPoint!]!
+    recentAlerts: [DashboardAlert!]!
+    supplies: [DashboardSupplyRow!]!
+    pendingApprovals: Int!
+    clientCount: Int!
+  }
+
+  type DashboardTotals {
+    activeSupplies: Int!
+    pendingSupplies: Int!
+    inactiveSupplies: Int!
+    lastPeriodCostEur: Float
+    prevPeriodCostEur: Float
+    lastPeriodKwh: Float
+    openAlerts: Int!
+    openAlertsHigh: Int!
+    annualSavingEur: Float
+    carbonDeltaPct: Float
+  }
+
+  type MonthlyCostPoint {
+    month: String!
+    eur: Float!
+  }
+
+  type DashboardAlert {
+    id: ID!
+    supplyId: ID!
+    cups: String!
+    type: String!
+    severity: String!
+    message: String!
+    detectedAt: String!
+  }
+
+  type DashboardSupplyRow {
+    id: ID!
+    cups: String!
+    clientName: String
+    tariff: Tariff!
+    status: SupplyStatus!
+    lastPeriod: String
+    lastKwh: Float
+    lastCostEur: Float
+    openAlerts: Int!
+    annualSavingEur: Float
+    backfillStatus: String!
+  }
+
   type Query {
     me: User!
+    dashboard: DashboardSummary!
     users(clientId: String, supplyId: String): [User!]!
     user(id: ID!): User
 
@@ -495,6 +655,8 @@ export const typeDefs = /* GraphQL */ `
 
     optimizeSolarSizing(input: OptimizeSolarSizingInput!): SolarSizingResult!
     optimizeSolarOrientation(input: OptimizeSolarOrientationInput!): SolarOrientationResult!
+
+    detectInverterMapping(input: DetectInverterMappingInput!): InverterMappingProposal!
   }
 
   type Mutation {
@@ -526,5 +688,7 @@ export const typeDefs = /* GraphQL */ `
     computeCarbonFootprint(input: ComputeCarbonInput!): CarbonReport!
 
     simulateSolar(input: SimulateSolarInput!): SolarSimulation!
+
+    analyzeInverterUpload(input: AnalyzeInverterUploadInput!): InverterUploadResult!
   }
 `;

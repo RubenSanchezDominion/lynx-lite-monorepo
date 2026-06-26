@@ -119,7 +119,7 @@ function madridMonthHour(utc: Date): { month: string; hour: number } {
   return { month: `${p.year}-${p.month}`, hour: Number(p.hour) };
 }
 
-function assertBackfillReady(supply: Supply): void {
+export function assertBackfillReady(supply: Supply): void {
   switch (supply.backfillStatus) {
     case 'PENDING':
       throw gqlError('BACKFILL_PENDING');
@@ -295,7 +295,9 @@ function assertLatLonLoss(lat: number, lon: number, lossPct: number): void {
 
 // Carga curva + maestros y devuelve las horas "tarificadas" (consumo + €/kWh) y la compensación de
 // excedentes, sin la producción (que cada candidato/escalado añade). Reutiliza la composición de M01.
-async function loadPricedHours(
+// Exportado para que M06.3 (inverterService) reutilice la MISMA composición de precio con la producción
+// MEDIDA en lugar de la estimada.
+export async function loadPricedHours(
   supply: Supply,
   prisma: PrismaClient,
   dataSource: SolarServiceDeps['dataSource'],
