@@ -4756,8 +4756,14 @@ extend type Mutation { analyzeInverterUpload(input: AnalyzeInverterUploadInput!)
   > **Lectura del fichero (solo front)**: el navegador convierte el fichero a `string[][]` antes de enviarlo;
   > el backend **siempre recibe filas de texto**, nunca el binario. CSV → split por `,`/`;`; **XLSX/XLS** →
   > SheetJS (`xlsx`, ya instalada por M04) vía import dinámico (`{ header: 1, raw: false }`). Si el libro
-  > Excel tiene **varias hojas**, un **selector** deja elegir cuál contiene la generación (por defecto la
-  > primera). A partir del `string[][]`, el flujo (detección + análisis) es idéntico para ambos formatos.
+  > Excel tiene **varias hojas**, un **selector** deja elegir cuál; por defecto se **preselecciona la hoja
+  > con más pinta de tabla de datos** (filas con fecha + número), no la primera ciega — los portales suelen
+  > poner una portada/resumen delante. A partir del `string[][]`, el flujo es idéntico para ambos formatos.
+  > **kWp y aviso de PR implausible**: el campo de potencia instalada **no tiene default** (un kWp incoherente
+  > con la planta es la causa nº1 de un performance ratio absurdo); se **autodetecta** de los metadatos del
+  > fichero si aparece ("capacidad/potencia instalada … kWp") y se propone para confirmar. Si el PR resultante
+  > sale **> 120 % o < 40 %**, la UI muestra un aviso de "revisa kWp/ubicación; el baseline probablemente no
+  > está calibrado" en lugar del ✅/⚠️ normal, para que un 164 % no se lea como una planta excelente.
 
 #### 8.12.9 Estado de implementación (2026-06-25)
 

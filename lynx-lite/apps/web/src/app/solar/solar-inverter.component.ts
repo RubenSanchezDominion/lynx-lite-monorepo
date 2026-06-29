@@ -1,4 +1,4 @@
-import { Component, Input } from '@angular/core';
+import { Component, Input, ViewChild, ElementRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { GraphqlService } from '../services/graphql.service';
@@ -76,7 +76,6 @@ const VALUE_KINDS = [
           </label>
           <label class="field">Latitud<input type="number" [(ngModel)]="lat" name="lat" step="0.01" /></label>
           <label class="field">Longitud<input type="number" [(ngModel)]="lon" name="lon" step="0.01" /></label>
-          <label class="field">Potencia instalada (kWp)<input type="number" [(ngModel)]="kwp" name="kwp" step="1" /></label>
         </div>
 
         <label class="field">Fichero del inversor (CSV o Excel)
@@ -138,6 +137,13 @@ const VALUE_KINDS = [
         <tr *ngFor="let row of previewRows"><td *ngFor="let cell of row">{{ cell }}</td></tr>
       </table></div>
 
+      <label class="field">Potencia instalada de la planta (kWp)
+        <input #kwpInput type="number" [(ngModel)]="kwp" name="kwp" step="1" placeholder="obligatorio"
+          [class.invalid]="kwpError" (ngModelChange)="kwpError = ''" />
+        <small class="hint" *ngIf="kwpFromFile && !kwpError">Detectado del fichero · confírmalo</small>
+        <small class="field-error" *ngIf="kwpError">{{ kwpError }}</small>
+      </label>
+
       <button (click)="analyze()" [disabled]="loading">{{ loading ? 'Analizando…' : '📈 Analizar producción real' }}</button>
     </div>
 
@@ -157,8 +163,11 @@ const VALUE_KINDS = [
         <div class="kpi"><span class="kv">{{ r.performance.specificYieldKwhPerKwp | number: '1.0-0' }}</span><span class="kl">kWh/kWp</span></div>
         <div class="kpi" *ngIf="r.performance.underperforming"><span class="kv">−{{ r.performance.underperformancePct | number: '1.0-0' }} %</span><span class="kl">bajo lo esperado</span></div>
       </div>
-      <p class="warn" *ngIf="r.performance.underperforming">⚠️ La planta produce por debajo de lo esperable: revisa suciedad, sombras o un string caído.</p>
-      <p class="ok" *ngIf="!r.performance.underperforming">✅ La producción está dentro de lo esperable para esta planta.</p>
+      <p class="warn alarm" *ngIf="prWarning">⚠️ {{ prWarning }}</p>
+      <ng-container *ngIf="!prWarning">
+        <p class="warn" *ngIf="r.performance.underperforming">⚠️ La planta produce por debajo de lo esperable: revisa suciedad, sombras o un string caído.</p>
+        <p class="ok" *ngIf="!r.performance.underperforming">✅ La producción está dentro de lo esperable para esta planta.</p>
+      </ng-container>
 
       <h4 class="sub">Validación del fichero</h4>
       <p class="muted">{{ r.report.rowsParsed }} filas · cobertura {{ r.report.coveragePct | number: '1.0-0' }}% ·
@@ -183,18 +192,17 @@ const VALUE_KINDS = [
   styles: [
     `
       .t { margin: 0 0 12px; font-size: 1rem; }
-      .sub { margin: 18px 0 10px; font-size: 0.82rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
+      .sub, .aside h4 { margin: 18px 0 10px; font-size: 0.82rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
       .muted { color: var(--muted); font-weight: 400; }
       .panel { display: flex; gap: 24px; align-items: flex-start; }
       .main { flex: 1; min-width: 0; }
       .field { margin-bottom: 12px; display: block; font-size: 0.85rem; color: var(--muted); }
       .field input, .field select { display: block; margin-top: 4px; }
       .grid-inputs { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px 16px; margin-bottom: 12px; }
-      input[type=number], input[type=text], input:not([type]), select { max-width: 220px; }
+      input:not([type=file]), select { max-width: 220px; }
       .aside { width: 250px; flex: 0 0 250px; border-left: 1px solid var(--border); padding-left: 20px; }
-      .aside h4 { margin: 0 0 10px; font-size: 0.82rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
       .leg-desc { font-size: 0.82rem; margin: 0 0 10px; }
-      .badge { font-size: 0.7rem; background: var(--accent); color: #fff; border-radius: 6px; padding: 2px 8px; margin-left: 8px; vertical-align: middle; }
+      .badge { font-size: 0.7rem; background: var(--accent); color: #fff; border-radius: 6px; padding: 2px 8px; margin-left: 8px; }
       .preview { overflow-x: auto; margin-bottom: 14px; }
       .kpis { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 8px; }
       .kpi { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; min-width: 120px; }
@@ -208,7 +216,12 @@ const VALUE_KINDS = [
       td.bad { color: #c0392b; font-weight: 600; }
       .error { color: #c0392b; }
       .warn { color: #b7791f; font-size: 0.85rem; margin: 4px 0; }
+      .warn.alarm { background: #fff4e5; border: 1px solid #f0c36d; border-radius: 8px; padding: 10px 12px; font-weight: 500; }
       .ok { color: #1e8e3e; font-size: 0.85rem; margin: 4px 0; }
+      .hint, .field-error { display: block; margin-top: 3px; font-size: 0.72rem; }
+      .hint { color: #1e8e3e; }
+      .field-error { color: #c0392b; font-weight: 500; }
+      input.invalid { border: 1px solid #c0392b !important; }
       @media (max-width: 720px) { .panel { flex-direction: column; } .aside { width: auto; flex: none; border-left: 0; border-top: 1px solid var(--border); padding: 16px 0 0; } }
     `,
   ],
@@ -218,7 +231,8 @@ export class SolarInverterComponent {
   supplyId = '';
   lat = 41.65;
   lon = -0.88;
-  kwp = 40;
+  kwp: number | null = null; // sin default: se rellena del fichero si se detecta, o lo teclea el usuario
+  kwpFromFile = false; // true si se autodetectó de los metadatos del fichero (para avisar en UI)
 
   valueKinds = VALUE_KINDS;
   rawRows: string[][] = [];
@@ -226,6 +240,7 @@ export class SolarInverterComponent {
   previewRows: string[][] = [];
   // Excel multi-hoja: si el libro trae varias, el usuario elige cuál contiene la generación.
   private workbook: import('xlsx').WorkBook | null = null;
+  private xlsxSync: typeof import('xlsx') | null = null; // instancia ya importada (para helpers síncronos)
   sheetNames: string[] = [];
   selectedSheet = '';
   proposal: Proposal | null = null;
@@ -233,6 +248,9 @@ export class SolarInverterComponent {
   result: UploadResult | null = null;
   loading = false;
   error = '';
+  kwpError = ''; // error específico del campo kWp (se muestra bajo el input, no al final)
+
+  @ViewChild('kwpInput') kwpInput?: ElementRef<HTMLInputElement>;
 
   constructor(private gql: GraphqlService) {}
 
@@ -252,28 +270,61 @@ export class SolarInverterComponent {
 
   // Carga el libro Excel (SheetJS, import dinámico → chunk lazy ya presente por M04). No normaliza:
   // el backend re-parsea los strings con el mapeo confirmado. Igual criterio que kpi.component.ts.
+  // Preselecciona la hoja con MÁS pinta de tabla de datos (no la primera ciega: los portales suelen
+  // poner una portada/resumen delante). El selector deja corregir.
   private async loadWorkbook(file: File): Promise<void> {
     const XLSX = await import('xlsx');
+    this.xlsxSync = XLSX;
     this.workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
     this.sheetNames = this.workbook.SheetNames;
-    this.selectedSheet = this.sheetNames[0] ?? '';
+    this.selectedSheet = this.pickBestSheet();
   }
 
-  // Filas (string[][]) de la hoja seleccionada del libro cargado.
+  // Filas (string[][]) de una hoja del libro (la seleccionada por defecto).
   private async sheetToRows(): Promise<string[][]> {
     if (!this.workbook || !this.selectedSheet) return [];
-    const XLSX = await import('xlsx');
-    const ws = this.workbook.Sheets[this.selectedSheet];
+    return this.rowsOfSheet(this.selectedSheet);
+  }
+
+  private rowsOfSheet(name: string): string[][] {
+    const XLSX = this.xlsxSync!;
+    const ws = this.workbook!.Sheets[name];
     const rows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, raw: false, blankrows: false });
     return rows.map(r => r.map(c => (c == null ? '' : String(c))));
   }
 
+  // Elige la hoja que más parece tabla de datos de inversor: la que tiene más filas con una celda
+  // que parece fecha/hora Y al menos una celda numérica. Empate o sin señal → la primera.
+  private pickBestSheet(): string {
+    const looksTime = (c: string) => /\d{4}-\d{2}-\d{2}/.test(c) || /\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}/.test(c) || /\d{10,13}/.test(c.trim());
+    const looksNum = (c: string) => /^[\s]*[-+]?\d[\d.,\s]*$/.test(c) && /\d/.test(c);
+    let best = this.sheetNames[0] ?? '';
+    let bestScore = -1;
+    for (const name of this.sheetNames) {
+      const rows = this.rowsOfSheet(name);
+      let score = 0;
+      for (const row of rows.slice(0, 60)) {
+        const hasTime = row.some(looksTime);
+        const hasNum = row.some(looksNum);
+        if (hasTime && hasNum) score++;
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        best = name;
+      }
+    }
+    return best;
+  }
+
   async onFile(ev: Event): Promise<void> {
     this.error = '';
+    this.kwpError = '';
     this.result = null;
     this.workbook = null;
+    this.xlsxSync = null;
     this.sheetNames = [];
     this.selectedSheet = '';
+    this.kwpFromFile = false;
     const file = (ev.target as HTMLInputElement).files?.[0];
     if (!file) return;
     try {
@@ -313,10 +364,51 @@ export class SolarInverterComponent {
     this.mapping = { ...data.detectInverterMapping.mapping };
     // Cabecera para los selectores (la fila skipRows del fichero crudo).
     this.headers = this.rawRows[this.mapping.skipRows] ?? this.rawRows[0] ?? [];
+    // Intentar autodetectar la potencia instalada de los metadatos del fichero (si no la tecleó ya).
+    this.tryDetectKwp();
+  }
+
+  // Busca "capacidad/potencia instalada … <número> kWp" en las primeras filas crudas (metadatos del
+  // portal). Si la encuentra y el usuario no había puesto un kWp, la propone. Un kWp incoherente con la
+  // planta es la causa nº1 de un performance ratio absurdo (p. ej. 60 kWp medido vs baseline a 40).
+  private tryDetectKwp(): void {
+    if (this.kwp != null) return; // respeta lo que el usuario haya tecleado
+    for (const row of this.rawRows.slice(0, 10)) {
+      const joined = row.join(' ').toLowerCase();
+      if (/(capacidad|potencia)\s*instalada|kwp|kw pico/.test(joined)) {
+        // Busca un número en la fila (admite coma decimal). Toma el primero plausible (> 0).
+        for (const cell of row) {
+          const n = Number(cell.replace(/\./g, '').replace(',', '.').replace(/[^\d.]/g, ''));
+          if (Number.isFinite(n) && n > 0) {
+            this.kwp = n;
+            this.kwpFromFile = true;
+            return;
+          }
+        }
+      }
+    }
+  }
+
+  // Aviso si el performance ratio sale fuera de rango realista: casi siempre significa que el kWp o la
+  // ubicación no coinciden con la planta (baseline mal calibrado), NO que la planta sea genial/penosa.
+  get prWarning(): string | null {
+    const pr = this.result?.performance.performanceRatio;
+    if (pr == null) return null;
+    if (pr > 1.2) return `Rendimiento del ${(pr * 100).toFixed(0)}%: parece demasiado alto. Revisa que el kWp (${this.kwp ?? '—'}) y la ubicación coincidan con la planta — probablemente el baseline esperado no está bien calibrado.`;
+    if (pr < 0.4) return `Rendimiento del ${(pr * 100).toFixed(0)}%: parece demasiado bajo. Antes de asumir una avería, revisa que el kWp y la ubicación sean correctos.`;
+    return null;
   }
 
   async analyze(): Promise<void> {
     this.error = '';
+    this.kwpError = '';
+    if (this.kwp == null || !(this.kwp > 0)) {
+      this.kwpError = 'Indica la potencia instalada de la planta para poder analizar.';
+      // Lleva el ojo (y el foco) al campo culpable, esté donde esté en la página.
+      this.kwpInput?.nativeElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      this.kwpInput?.nativeElement.focus();
+      return;
+    }
     this.loading = true;
     try {
       const { timeFormat, ...rest } = this.mapping;
