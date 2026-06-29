@@ -102,11 +102,73 @@ export async function createInMemoryStore() {
     }
   }
 
-  const preInvoices: Row[] = [];
-  const powerOptimizations: Row[] = [];
+  // M01 — pre-facturas sembradas (3 meses por suministro) para que el Dashboard (§11) muestre
+  // coste último/anterior y serie mensual sin recalcular nada. Una línea de energía (unit 'kWh')
+  // por factura permite derivar el consumo del periodo.
+  const buildPreInvoice = (
+    supplyId: string, tariff: string, month: number, total: number, kwh: number,
+  ): Row => {
+    const periodFrom = new Date(Date.UTC(2026, month, 1));
+    const periodTo = new Date(Date.UTC(2026, month + 1, 1));
+    const energyTerm = total * 0.6;
+    const powerTerm = total * 0.25;
+    const id = randomUUID();
+    return {
+      id, supplyId, periodFrom, periodTo, tariff,
+      powerTerm, energyTerm, excessPower: 0, reactiveEnergy: null, surplusCompensation: null,
+      meterRental: 1.2, subtotal: total / 1.21, ieeAmount: total * 0.04, vatAmount: total * 0.1736,
+      total, gapHoursCount: 0, gapPeriodsJson: null, createdAt: now,
+      lines: [
+        { id: randomUUID(), preInvoiceId: id, concept: 'Término de energía P1', period: 1,
+          quantity: kwh, unit: 'kWh', unitPrice: energyTerm / kwh, amount: energyTerm, sortOrder: 1 },
+      ],
+    };
+  };
+  const preInvoices: Row[] = [
+    buildPreInvoice('supply-30td', 'T_3_0TD', 2, 16800, 82000), // mar
+    buildPreInvoice('supply-30td', 'T_3_0TD', 3, 17850, 84200), // abr
+    buildPreInvoice('supply-30td', 'T_3_0TD', 4, 17200, 83100), // may
+    buildPreInvoice('supply-20td', 'T_2_0TD', 2, 940, 3980), // mar
+    buildPreInvoice('supply-20td', 'T_2_0TD', 3, 980, 4120), // abr
+    buildPreInvoice('supply-20td', 'T_2_0TD', 4, 910, 3870), // may
+  ];
 
-  // M03 — alertas (vacías al arrancar) + config sembrada por suministro (franja inactiva nocturna).
-  const alerts: Row[] = [];
+  // M02 — una optimización recomendada para supply-30td (ahorro anual potencial en el panel).
+  const powerOptimizations: Row[] = [
+    {
+      id: randomUUID(), supplyId: 'supply-30td', tariff: 'T_3_0TD',
+      analysisFrom: new Date('2025-06-01T00:00:00.000Z'), analysisTo: new Date('2026-06-01T00:00:00.000Z'),
+      granularity: 'hourly', upliftFactor: 1.05, sampleCount: 8760,
+      fixedSaving: 2600, excessSaving: 600, annualSaving: 3200,
+      recommendChange: true, changeAllowed: true, changeBlockedUntil: null,
+      periods: [], createdAt: now,
+    },
+  ];
+
+  // M03 — alertas abiertas sembradas (severidades distintas) + config por suministro.
+  const alerts: Row[] = [
+    {
+      id: randomUUID(), supplyId: 'supply-30td', type: 'LIMIT', severity: 'CRITICAL', status: 'NEW',
+      period: 3, windowStart: new Date('2026-05-20T18:00:00.000Z'), windowEnd: new Date('2026-05-20T19:00:00.000Z'),
+      observedValue: 49.2, expectedValue: 47.5, deviation: 1.04,
+      message: 'Potencia cercana al límite contratado en P3', detectedAt: new Date('2026-05-20T19:05:00.000Z'),
+      acknowledgedBy: null, acknowledgedAt: null,
+    },
+    {
+      id: randomUUID(), supplyId: 'supply-30td', type: 'ZSCORE', severity: 'WARNING', status: 'NEW',
+      period: 2, windowStart: new Date('2026-05-18T03:00:00.000Z'), windowEnd: new Date('2026-05-18T04:00:00.000Z'),
+      observedValue: 38.1, expectedValue: 12.4, deviation: 3.2,
+      message: 'Consumo atípico en franja nocturna', detectedAt: new Date('2026-05-18T04:10:00.000Z'),
+      acknowledgedBy: null, acknowledgedAt: null,
+    },
+    {
+      id: randomUUID(), supplyId: 'supply-20td', type: 'ESTIMATED', severity: 'INFO', status: 'NEW',
+      period: 0, windowStart: new Date('2026-05-15T00:00:00.000Z'), windowEnd: new Date('2026-05-16T00:00:00.000Z'),
+      observedValue: 0, expectedValue: null, deviation: null,
+      message: 'Lectura estimada (hueco DATADIS)', detectedAt: new Date('2026-05-16T06:00:00.000Z'),
+      acknowledgedBy: null, acknowledgedAt: null,
+    },
+  ];
   const defaultWindows = [{ days: [0, 1, 2, 3, 4, 5, 6], from: '00:00', to: '06:00' }];
   const alertConfigs: Row[] = ['supply-20td', 'supply-30td'].map(supplyId => ({
     id: randomUUID(), supplyId, enabled: true, sensitivity: 'EQUILIBRADO',
@@ -233,6 +295,12 @@ export async function createInMemoryStore() {
         if (i >= 0) users.splice(i, 1);
         return {};
       },
+    },
+
+    client: {
+      findUnique: async ({ where }: { where: Row }) => findUniqueBy(clients, where),
+      findMany: async ({ where = {} }: { where?: Row } = {}) =>
+        clients.filter(c => Object.keys(where).every(k => where[k] === undefined || c[k] === where[k])),
     },
 
     supply: {

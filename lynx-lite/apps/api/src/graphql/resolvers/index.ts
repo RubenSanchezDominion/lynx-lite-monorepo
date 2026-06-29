@@ -8,10 +8,12 @@ import { carbonResolvers } from './carbon.js';
 import { solarResolvers } from './solar.js';
 import { inverterResolvers } from './inverter.js';
 import { comparisonResolvers } from './comparison.js';
+import { dashboardResolvers } from './dashboard.js';
 
 export const resolvers = {
   Query: {
     ...authResolvers.Query,
+    ...dashboardResolvers.Query,
     ...supplyResolvers.Query,
     ...preInvoiceResolvers.Query,
     ...comparisonResolvers.Query,

@@ -13,6 +13,7 @@ import { AuthService } from '../services/auth.service';
     <header class="navbar">
       <span class="brand"><span class="bolt">⚡</span> LYNX&nbsp;Lite</span>
       <nav class="nav">
+        <a routerLink="/dashboard" routerLinkActive="active">Dashboard</a>
         <a routerLink="/prefactura" routerLinkActive="active">Pre-factura</a>
         <a routerLink="/optimizacion" routerLinkActive="active">Optimización</a>
         <a routerLink="/alertas" routerLinkActive="active">Alertas</a>
@@ -20,6 +21,8 @@ import { AuthService } from '../services/auth.service';
         <a routerLink="/huella" routerLinkActive="active">Huella</a>
         <a routerLink="/solar" routerLinkActive="active">Solar</a>
         <a routerLink="/comparacion" routerLinkActive="active">Comparativa</a>
+        <a routerLink="/informes" routerLinkActive="active">Informes</a>
+        <a routerLink="/usuarios" routerLinkActive="active">Usuarios</a>
       </nav>
       <span class="spacer"></span>
       <span class="user" *ngIf="auth.user as u">{{ u.email }} · {{ u.role }}</span>
