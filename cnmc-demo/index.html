@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Demo · Comparador de ofertas CNMC</title>
+  <style>
+    :root { --bg:#0f1115; --card:#191c22; --line:#2a2e37; --txt:#e7e9ee; --mut:#9aa0ac; --acc:#4ea1ff; --ok:#3fb950; --bad:#f85149; }
+    * { box-sizing: border-box; }
+    body { margin:0; font:15px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--txt); }
+    header { padding:20px 24px; border-bottom:1px solid var(--line); }
+    h1 { font-size:18px; margin:0; }
+    header p { margin:4px 0 0; color:var(--mut); font-size:13px; }
+    main { max-width:1000px; margin:0 auto; padding:24px; }
+    form { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px; background:var(--card); padding:18px; border:1px solid var(--line); border-radius:10px; }
+    label { display:flex; flex-direction:column; gap:5px; font-size:12px; color:var(--mut); }
+    input, select { background:#0f1115; color:var(--txt); border:1px solid var(--line); border-radius:7px; padding:8px 9px; font:inherit; }
+    .actions { grid-column:1/-1; display:flex; gap:12px; align-items:center; }
+    button { background:var(--acc); color:#08111f; border:0; border-radius:8px; padding:10px 18px; font-weight:600; cursor:pointer; }
+    button:disabled { opacity:.5; cursor:wait; }
+    #status { color:var(--mut); font-size:13px; }
+    .summary { margin:22px 0; padding:16px 18px; border:1px solid var(--line); border-radius:10px; background:var(--card); display:none; }
+    .summary.show { display:block; }
+    .big { font-size:26px; font-weight:700; }
+    .ok { color:var(--ok); } .bad { color:var(--bad); }
+    table { width:100%; border-collapse:collapse; margin-top:8px; font-size:14px; }
+    th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); }
+    th { color:var(--mut); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.03em; }
+    td.num { text-align:right; font-variant-numeric:tabular-nums; }
+    tr:first-child td { background:rgba(78,161,255,.08); }
+    .tag { font-size:11px; padding:2px 7px; border-radius:20px; border:1px solid var(--line); color:var(--mut); }
+    .tag.green { color:var(--ok); border-color:rgba(63,185,80,.4); }
+    .tag.pen { color:var(--bad); border-color:rgba(248,81,73,.4); }
+    .note { color:var(--mut); font-size:12px; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Comparador de ofertas CNMC — demo</h1>
+    <p>Datos reales del cliente → API pública de la CNMC → ranking de comercializadoras y ahorro vs. coste actual.</p>
+  </header>
+  <main>
+    <form id="f">
+      <label>Código postal<input name="cp" value="1400" /></label>
+      <label>Potencia (kW)<input name="potencia" type="number" step="0.1" value="3.5" /></label>
+      <label>Tarifa
+        <select name="tarifa"><option value="4">2.0TD</option><option value="6">3.0TD</option></select>
+      </label>
+      <label>Consumo P1 (kWh)<input name="c1" type="number" value="64" /></label>
+      <label>Consumo P2 (kWh)<input name="c2" type="number" value="54" /></label>
+      <label>Consumo P3 (kWh)<input name="c3" type="number" value="103" /></label>
+      <label>Consumo anual (kWh)<input name="consumoAnual" type="number" value="2600" /></label>
+      <label>Coste actual (€, mismo periodo)<input name="costeActual" type="number" step="0.01" value="120" /></label>
+      <div class="actions">
+        <button type="submit">Comparar ofertas</button>
+        <span id="status"></span>
+      </div>
+    </form>
+
+    <div id="summary" class="summary"></div>
+    <div id="results"></div>
+  </main>
+
+  <script>
+    const f = document.getElementById('f');
+    const statusEl = document.getElementById('status');
+    const summaryEl = document.getElementById('summary');
+    const resultsEl = document.getElementById('results');
+    const eur = n => n.toLocaleString('es-ES', { style:'currency', currency:'EUR' });
+
+    f.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = f.querySelector('button');
+      btn.disabled = true; statusEl.textContent = 'Consultando a la CNMC…';
+      summaryEl.classList.remove('show'); resultsEl.innerHTML = '';
+      try {
+        const qs = new URLSearchParams(new FormData(f)).toString();
+        const r = await fetch('/api/offers?' + qs);
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+        render(data);
+        statusEl.textContent = data.total + ' ofertas';
+      } catch (err) {
+        statusEl.textContent = 'Error: ' + err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    function render(data) {
+      const c = data.comparacion;
+      if (c) {
+        const ahorra = c.ahorro >= 0;
+        summaryEl.innerHTML = `
+          <div>Mejor oferta del mercado: <strong>${eur(c.mejorOferta)}</strong>
+            vs. tu coste actual <strong>${eur(c.costeActual)}</strong></div>
+          <div class="big ${ahorra ? 'ok' : 'bad'}">
+            ${ahorra ? '↓ Ahorras' : '↑ Pagarías más'} ${eur(Math.abs(c.ahorro))}
+            <span style="font-size:15px">(${ahorra ? '-' : '+'}${Math.abs(c.ahorroPct)}%)</span>
+          </div>`;
+        summaryEl.classList.add('show');
+      }
+      const rows = data.ofertas.slice(0, 30).map((o, i) => `
+        <tr>
+          <td class="num">${i + 1}</td>
+          <td>${o.comercializadora}</td>
+          <td>${o.oferta}
+            ${o.verde ? '<span class="tag green">verde</span>' : ''}
+            ${o.penalizacion ? '<span class="tag pen">permanencia</span>' : ''}
+          </td>
+          <td class="num">${eur(o.importePrimerAnio)}</td>
+          <td class="num">${eur(o.importeSegundoAnio)}</td>
+        </tr>`).join('');
+      resultsEl.innerHTML = `
+        <table>
+          <thead><tr><th>#</th><th>Comercializadora</th><th>Oferta</th>
+            <th style="text-align:right">1er año</th><th style="text-align:right">2º año</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <p class="note">Importes según los devuelve la CNMC para el escenario indicado. Top 30 de ${data.total}.
+          El "coste actual" debe estar en la misma base de periodo para que el ahorro sea comparable.</p>`;
+    }
+  </script>
+</body>
+</html>

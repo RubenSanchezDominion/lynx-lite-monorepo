@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PoC · Comparador de cotizaciones AT (6.xTD)</title>
+  <style>
+    :root { --bg:#0f1115; --card:#191c22; --line:#2a2e37; --txt:#e7e9ee; --mut:#9aa0ac; --acc:#4ea1ff; --ok:#3fb950; --warn:#d29922; --bad:#f85149; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:15px/1.45 system-ui,sans-serif; background:var(--bg); color:var(--txt); }
+    header { padding:20px 24px; border-bottom:1px solid var(--line); }
+    h1 { font-size:18px; margin:0; }
+    header p { margin:4px 0 0; color:var(--mut); font-size:13px; }
+    main { max-width:1080px; margin:0 auto; padding:24px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px; background:var(--card); padding:18px; border:1px solid var(--line); border-radius:10px; }
+    label { display:flex; flex-direction:column; gap:5px; font-size:12px; color:var(--mut); }
+    input { background:#0f1115; color:var(--txt); border:1px solid var(--line); border-radius:7px; padding:8px 9px; font:inherit; }
+    .actions { grid-column:1/-1; display:flex; gap:12px; align-items:center; }
+    button { background:var(--acc); color:#08111f; border:0; border-radius:8px; padding:10px 18px; font-weight:600; cursor:pointer; }
+    button:disabled { opacity:.5; cursor:wait; }
+    #status { color:var(--mut); font-size:13px; }
+    .market { display:flex; gap:24px; flex-wrap:wrap; margin:18px 0; padding:14px 18px; background:var(--card); border:1px solid var(--line); border-radius:10px; }
+    .market div span { display:block; }
+    .market .k { font-size:11px; color:var(--mut); text-transform:uppercase; letter-spacing:.03em; }
+    .market .v { font-size:20px; font-weight:700; }
+    table { width:100%; border-collapse:collapse; margin-top:8px; font-size:14px; }
+    th,td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); }
+    th { color:var(--mut); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.03em; }
+    td.num { text-align:right; font-variant-numeric:tabular-nums; }
+    tr.best td { background:rgba(63,185,80,.10); }
+    .tag { font-size:11px; padding:2px 7px; border-radius:20px; border:1px solid var(--line); color:var(--mut); }
+    .risk { position:relative; height:10px; background:#0f1115; border:1px solid var(--line); border-radius:6px; min-width:160px; }
+    .risk > span { position:absolute; top:-1px; height:10px; border-radius:6px; }
+    .note { color:var(--mut); font-size:12px; margin-top:10px; }
+    .warn { color:var(--warn); }
+    h2 { font-size:14px; margin:26px 0 6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Comparador de cotizaciones — Alta Tensión (6.xTD)</h1>
+    <p>Precio spot REAL (REData/REE) × curva del cliente → coste esperado y riesgo de cada cotización: fijo · indexado · híbrido · PPA.</p>
+  </header>
+  <main>
+    <div class="grid">
+      <label>Consumo anual (MWh)<input id="mwhAnual" type="number" value="4000" /></label>
+      <label>Potencia media (kW)<input id="potKw" type="number" value="1000" /></label>
+      <label>Forward OMIP (€/MWh)<input id="forward" type="number" value="65" /></label>
+      <label>Peajes+cargos (€/MWh)<input id="reguladoEurMwh" type="number" value="22" /></label>
+      <label>Término potencia (€/kW·año)<input id="potEurKwAnual" type="number" value="26" /></label>
+      <div class="actions">
+        <button id="go">Comparar cotizaciones</button>
+        <span id="status"></span>
+      </div>
+    </div>
+
+    <div id="market" class="market" style="display:none"></div>
+    <div id="results"></div>
+    <p class="note">PoC: el <strong>spot es real</strong> (REData). Forward, peajes/cargos 6.1TD y curva de carga son
+      <span class="warn">orientativos</span> (en producción: OMIP, CNMC/BOE y Datadis). El coste se compara <strong>sin IVA</strong> (deducible para empresa).</p>
+  </main>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const eur = n => Math.round(n).toLocaleString('es-ES') + ' €';
+    const SCEN_COLOR = { 'Bajo':'#3fb950', 'Central':'#4ea1ff', 'Alto':'#d29922', 'Estrés':'#f85149' };
+
+    $('go').addEventListener('click', async () => {
+      const btn = $('go'); btn.disabled = true; $('status').textContent = 'Consultando mercado (REData)…';
+      $('results').innerHTML = ''; $('market').style.display = 'none';
+      try {
+        const p = new URLSearchParams();
+        for (const k of ['mwhAnual','potKw','forward','reguladoEurMwh','potEurKwAnual']) p.set(k, $(k).value);
+        const r = await fetch('/api/compare?' + p.toString());
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+        render(d);
+        $('status').textContent = d.resultados.length + ' cotizaciones · spot real ' + d.mercado.spotMedioReal + ' €/MWh';
+      } catch (e) { $('status').textContent = 'Error: ' + e.message; }
+      finally { btn.disabled = false; }
+    });
+
+    function render(d) {
+      $('market').style.display = 'flex';
+      $('market').innerHTML = `
+        <div><span class="k">Spot medio real</span><span class="v">${d.mercado.spotMedioReal} €/MWh</span></div>
+        <div><span class="k">Precio capturado (central)</span><span class="v">${d.mercado.capturadoCentral} €/MWh</span></div>
+        <div><span class="k">Fuente</span><span class="v" style="font-size:13px;font-weight:500">${d.mercado.fuente}</span></div>`;
+
+      const gMin = Math.min(...d.resultados.map(r => r.min));
+      const gMax = Math.max(...d.resultados.map(r => r.max));
+      const span = (gMax - gMin) || 1;
+      const pos = v => ((v - gMin) / span) * 100;
+
+      const rows = d.resultados.map((r, i) => `
+        <tr class="${i === 0 ? 'best' : ''}">
+          <td>${i + 1}</td>
+          <td>${r.nombre} <span class="tag">${r.tipo}</span></td>
+          <td class="num"><strong>${eur(r.esperado)}</strong></td>
+          <td>
+            <div class="risk" title="Rango ${eur(r.min)} – ${eur(r.max)}">
+              <span style="left:${pos(r.min)}%; width:${Math.max(2, pos(r.max) - pos(r.min))}%;
+                    background:linear-gradient(90deg,#3fb95066,#f8514966);"></span>
+            </div>
+          </td>
+          <td class="num">${eur(r.banda)}</td>
+        </tr>`).join('');
+
+      const scenCols = d.escenarios.map(s => `<th class="num">${s.name}<br><span style="font-weight:400">${Math.round(s.prob*100)}%</span></th>`).join('');
+      const detail = d.resultados.map(r => `
+        <tr><td>${r.nombre}</td>${r.perEscenario.map(e =>
+          `<td class="num" style="color:${SCEN_COLOR[e.escenario]}">${eur(e.total)}</td>`).join('')}</tr>`).join('');
+
+      $('results').innerHTML = `
+        <h2>Ranking por coste anual esperado</h2>
+        <table>
+          <thead><tr><th>#</th><th>Cotización</th><th class="num">Coste esperado</th>
+            <th>Riesgo (rango Bajo→Estrés)</th><th class="num">Banda</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <p class="note">La barra muestra la exposición: estrecha = precio cierto (fijo/PPA), ancha = volátil (indexado).
+          El "esperado" pondera los 4 escenarios; ojo a quien gana en esperado pero tiene banda enorme.</p>
+        <h2>Coste anual por escenario de mercado</h2>
+        <table>
+          <thead><tr><th>Cotización</th>${scenCols}</tr></thead>
+          <tbody>${detail}</tbody>
+        </table>`;
+    }
+
+    $('go').click();
+  </script>
+</body>
+</html>
